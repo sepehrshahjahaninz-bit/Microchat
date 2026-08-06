@@ -1,9 +1,11 @@
-from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_REUSEADDR
+from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_REUSEADDR, SOCK_DGRAM, IPPROTO_UDP, SOL_IP, IP_ADD_MEMBERSHIP, IPPROTO_IP, INADDR_ANY, inet_aton
 from threading import Thread, Lock
 from json import dumps, loads
 from time import localtime
 import os
+import struct
 
+MCAST_PORT = 4488
 PING_PORT = 2086
 VOICE_PORT = 2082
 CHAT_PORT = 2052
@@ -11,7 +13,7 @@ DESTRUCTION_LISTENER_PORT = 2053
 PORT_MESSAGE_HISTORY = 2054
 DESTRUCTOR_PASSWORD = 'ilikemicrochat2026'
 
-ROOMS_DIR = os.path.join(os.path.dirname(__file__), "rooms_WAN")
+ROOMS_DIR = os.path.join(os.path.dirname(__file__), "rooms_LAN")
 if not os.path.exists(ROOMS_DIR):
     os.makedirs(ROOMS_DIR)
 
@@ -348,9 +350,24 @@ def request_message_history():
             print(f"History request error: {e}")
 
 
+def finder():
+    global MCAST_PORT
+    MCAST_GRP = '239.255.255.250'
+    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+    s.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+    s.bind(('', MCAST_PORT))
+    mreq = struct.pack("4sl", inet_aton(MCAST_GRP), INADDR_ANY)
+    s.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq)
+    while True:
+        data, addr = s.recvfrom(1024)
+        if data == b'//*LOOKING FOR SERVER//*':
+            s.sendto(b'//*SERVER IS HERE//*', addr)
+
+
 Thread(target=voice_chat_server, daemon=True).start()
 Thread(target=ping_server, daemon=True).start()
 Thread(target=self_destruction_transmitter, daemon=True).start()
 Thread(target=request_message_history, daemon=True).start()
+Thread(target=finder, daemon=True).start()
 
 accept_client_connection()
