@@ -5,7 +5,6 @@ from tkinter import ttk
 from tkinter import filedialog
 from time import time, sleep
 from pyautogui import prompt
-from plyer import notification
 from threading import Thread
 from random import choice
 from queue import Queue
@@ -15,12 +14,13 @@ import base64
 from PIL import Image, ImageTk
 import io
 
-WIDTH, HEIGHT = 460, 520
+WIDTH, HEIGHT = 680, 520
 HOST = "chat.shahjahani.com"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_PING = 2086
 PORT_DELETE = 2053
+PORT_MESSAGE_HISTORY = 2054
 
 connect = 0
 nickname = ''
@@ -46,6 +46,13 @@ def create_a_name(availableclies):
         return
     return nickname
 
+root = Tk()
+root.withdraw()
+root.title('μChat')
+root.geometry(f'{WIDTH}x{HEIGHT}')
+root.config(background='light gray')
+root.resizable(False, False)
+
 try:
     client = socket(AF_INET, SOCK_STREAM)
     client.settimeout(5)
@@ -57,46 +64,84 @@ except Exception as e:
     showerror(title='μChat', message=f'Cannot connect to server.\nErr : {e}')
     quit()
 
-while chatID == '':
-    a = askyesnocancel(title='μChat', message='Do you want to join a chat? Click no if you would like to create a new room.')
-    if a == True:
-        CID = prompt(title='μChat', text=f'Enter Room ID\nAvailable rooms : {visiblerooms}')
-        if CID is None:
-            quit()
-        else:
-            try:
-                if CID in availableclies:
-                    chatID = CID
-                    connectedormaderoom = True
-                    break
-                else:
-                    showerror(title='μChat', message='Invalid Room ID.')
-            except:
-                showerror(title='μChat', message='Invalid Room ID.')
-    elif a == False:
-        CID = str(create_a_name(availableclies))
-        connectedormaderoom = False
-        chatID = CID
-    elif a == None:
+def show_login_dialog():
+    global chatID, nickname, id_visible, connectedormaderoom
+    a = askyesnocancel(title='μChat', message='Do you want to join a chat? Click No to create a new room.')
+    if a is None:
         quit()
+    logindiag = Toplevel(root)
+    logindiag.title('μChat')
+    logindiag.geometry('460x250')
+    logindiag.resizable(False, False)
+    if a is True:
+        toplabel = Label(logindiag, text="Enter the room ID to join.", font=("Arial", 10), fg='black')
+        toplabel.pack(anchor=W, padx=10, pady=(5, 0))
+        publicrooms = Label(logindiag, text=f"Available rooms: {visiblerooms}", font=("Arial", 9), fg='black',wraplength=400)
+        publicrooms.pack(anchor=W, padx=10)
+        Label(logindiag, text="Room ID:").pack(anchor=W, padx=10)
+        idfield = Entry(logindiag, width=50)
+        idfield.pack(anchor=W, padx=10)
+        idfield.focus()
+        Label(logindiag, text="Nickname:").pack(anchor=W, padx=10)
+        nicknamefield = Entry(logindiag, width=50)
+        nicknamefield.pack(anchor=W, padx=10)
+        id_visible_var = BooleanVar(value=True)
+        def validate():
+            global chatID, nickname, id_visible, connectedormaderoom
+            r_id = idfield.get().strip()
+            nick = nicknamefield.get().strip()
+            if not r_id:
+                showerror(title='μChat', message='Room ID cannot be empty.', parent=logindiag)
+                return
+            if not nick:
+                showerror(title='μChat', message='Nickname cannot be empty.', parent=logindiag)
+                return
+            if r_id in availableclies:
+                chatID = r_id
+                nickname = nick
+                connectedormaderoom = True
+                id_visible = id_visible_var.get()
+                logindiag.destroy()
+            else:
+                showerror(title='μChat', message='Invalid Room ID.', parent=logindiag)
+        btn_frame = Frame(logindiag)
+        btn_frame.pack(fill='x', pady=10)
+        Button(btn_frame, text="Join", command=validate, bg="green", fg="white", width=10).pack(side="left", padx=15)
+        Button(btn_frame, text="Cancel", command=lambda: (logindiag.destroy(), quit()), bg="red", fg="white", width=10).pack(side="right", padx=15)
+        logindiag.update_idletasks()
+        needed_height = max(250, logindiag.winfo_reqheight())
+        logindiag.geometry(f'460x{needed_height}')
+    else:
+        logindiag.geometry('300x200')
+        toplabel = Label(logindiag, text="Create a new room", font=("Arial", 10, "bold"), fg='black')
+        toplabel.pack(anchor=W, padx=10, pady=(5, 0))
+        Label(logindiag, text="Nickname:").pack(anchor=W, padx=10, pady=(5, 0))
+        nicknamefield = Entry(logindiag, width=30)
+        nicknamefield.pack(anchor=W, padx=10)
+        nicknamefield.focus()
+        id_visible_var = BooleanVar(value=True)
+        Checkbutton(logindiag, text="Room visible publicly", variable=id_visible_var).pack(anchor=W, padx=10, pady=5)
+        def create_room():
+            global chatID, nickname, id_visible, connectedormaderoom
+            nick = nicknamefield.get().strip()
+            if not nick:
+                showerror(title='μChat', message='Nickname cannot be empty.', parent=logindiag)
+                return
+            chatID = create_a_name(availableclies)
+            nickname = nick
+            id_visible = id_visible_var.get()
+            connectedormaderoom = False
+            logindiag.destroy()
+        btn_frame = Frame(logindiag)
+        btn_frame.pack(fill='x', pady=10)
+        Button(btn_frame, text="Create", command=create_room, bg="green", fg="white", width=10).pack(side="left", padx=15)
+        Button(btn_frame, text="Cancel", command=lambda: (logindiag.destroy(), quit()), bg="red", fg="white", width=10).pack(side="right", padx=15)
+    root.wait_window(logindiag)
 
-while id_visible == None and connectedormaderoom == False:
-    result = askyesnocancel(title='μChat', message='Make room visible to people connecting?')
-    if result == True:
-        id_visible = True
-        break
-    elif result == False:
-        id_visible = False
-        break
-    elif result == None:
-        quit()
+while not (chatID and nickname):
+    show_login_dialog()
 
-while nickname == '':
-    nickname = prompt(title='μChat', text='Enter your nickname')
-    if nickname is None:
-        quit()
-    elif nickname == '':
-        showwarning(title='μChat', message='Nickname required.')
+root.deiconify()
 
 try:
     data = {
@@ -135,10 +180,10 @@ def clear_chat_frame():
 def create_new_message_bubble(message, message_type, name, description=""):
     if message_type == "text_message":
         text = f"{message}"
-        bubble_frame = Frame(tbxmain, bg='light green', width=390)
+        bubble_frame = Frame(tbxmain, bg='light green', width=620)
         name_label = Label(bubble_frame, text=name, fg='black', bg='light green', font=('Arial', 8, 'bold'), anchor=W, justify=LEFT)
         name_label.pack(pady=(5, 0), padx=5, anchor=W)
-        message_label = Label(bubble_frame, text=text, fg='black', bg='light green', anchor=W, wraplength=250, justify=LEFT)
+        message_label = Label(bubble_frame, text=text, fg='black', bg='light green', anchor=W, wraplength=580, justify=LEFT)
         message_label.pack(pady=5, padx=5, anchor=W)
         bubble_frame.pack(pady=4, padx=8, anchor=W)
         update_scroll()
@@ -146,16 +191,16 @@ def create_new_message_bubble(message, message_type, name, description=""):
         try:
             image_bytes = base64.b64decode(message)
             raw_img = Image.open(io.BytesIO(image_bytes))
-            raw_img.thumbnail((220, 220))
+            raw_img.thumbnail((550, 440))
             tk_img = ImageTk.PhotoImage(raw_img)
-            bubble_frame = Frame(tbxmain, bg='light green', width=390)
+            bubble_frame = Frame(tbxmain, bg='light green', width=620)
             name_label = Label(bubble_frame, text=f"{name} :", fg='black', bg='light green', font=('Arial', 8, 'bold'), anchor=W)
             name_label.pack(pady=(5, 2), padx=5, anchor=W)
             img_label = Label(bubble_frame, image=tk_img, bg='light green')
             img_label.image = tk_img
             img_label.pack(pady=2, padx=5, anchor=W)
             if description and description != "none":
-                desc_label = Label(bubble_frame, text=description, fg='black', bg='light green', anchor=W, wraplength=220, justify=LEFT)
+                desc_label = Label(bubble_frame, text=description, fg='black', bg='light green', anchor=W, wraplength=580, justify=LEFT)
                 desc_label.pack(pady=(2, 5), padx=5, anchor=W)
             bubble_frame.pack(pady=4, padx=8, anchor=W)
             update_scroll()
@@ -273,6 +318,7 @@ def handle_room_destruction():
     micbtn.config(state=DISABLED, bg='grey')
     imagebtn.config(state=DISABLED, bg='grey')
     destbtn.config(state=DISABLED, bg='grey')
+    loadhistbtn.config(state=DISABLED, bg='grey')
 
     try:
         client.close()
@@ -318,19 +364,9 @@ def receive():
                 
                 if root.state() != 'normal':
                     if message_type == "text_message":
-                        notification.notify(
-                            title="New Message",
-                            message=f'{name}: {message}',
-                            app_name="μChat",
-                            timeout=5
-                        )
+                        root.after(0, notification_listener, message, name)
                     elif message_type == "image_message":
-                        notification.notify(
-                            title="New Message",
-                            message=f'Image from {name}:\n{description}',
-                            app_name="μChat",
-                            timeout=5
-                        )
+                        root.after(0, notification_listener, f'Image from {name}:\n{description}', name)
                 if autoscroll.get() == 1:
                     tbxmaincanvas.yview_moveto(1.0)
                 root.config(bg='green')
@@ -349,6 +385,59 @@ def receive():
                 image_attached = False
         except Exception as x:
             sleep(0.1)
+
+def load_history():
+    try:
+        def ignore_btn():
+            pass
+        promptscreen = Toplevel()
+        promptscreen.protocol("WM_DELETE_WINDOW", ignore_btn)
+        promptscreen.resizable(False, False)
+        promptscreen.title("μChat")
+        promptscreen.geometry('300x70')
+        toplabel = Label(promptscreen, text="Loading history...", font=("Arial", 12), fg='black')
+        toplabel.place(x=10, y=10)
+        progressbar = ttk.Progressbar(promptscreen, length=280)
+        progressbar.place(x=10, y=40)
+        progressbar.config(value=10)
+        sock = socket(AF_INET, SOCK_STREAM)
+        progressbar.config(value=20)
+        sock.connect((HOST, PORT_MESSAGE_HISTORY))
+        progressbar.config(value=30)
+        sock.sendall((dumps({"room_ID": chatID}) + "\n").encode("utf-8"))
+        progressbar.config(value=50)
+        buffer = ""
+        while True:
+            chunk = sock.recv(4096).decode("utf-8")
+            if not chunk:
+                break
+            buffer += chunk
+            if "\n" in buffer:
+                break
+        progressbar.config(value=80)
+        data_dict = loads(buffer.strip())
+        history = data_dict.get("history", [])
+        progressbar.config(value=85)
+        clear_chat_frame()
+        progressbar.config(value=90)
+        for msg in history:
+            if msg.get("message_type") == "text_message":
+                create_new_message_bubble(msg.get("data"), msg.get("message_type"), msg.get("name"), msg.get("description"))
+            elif msg.get("message_type") == "image_message":
+                create_new_message_bubble(name=msg.get("name"), message=msg.get("data"), message_type="image_message", description=msg.get("description"))
+        progressbar.config(value=95)
+        sock.close()
+        progressbar.config(value=100)
+        promptscreen.destroy()
+        return
+    except Exception as e:
+        showerror(title='μChat', message=f"Can't load history.\n{e}")
+        try :
+            promptscreen.destroy()
+        except Exception:
+            pass
+        return
+        
 
 def header():
     while True:
@@ -421,7 +510,7 @@ try:
 except:
     showwarning(title='μChat', message='No Audio input/output device detected! Voice chat is unavailable.')
     noinputoutput = True
-    
+   
 if not noinputoutput:
     try:
         voicesocket = socket(AF_INET, SOCK_STREAM)
@@ -480,41 +569,90 @@ def voice_sender():
 def update_scroll(event=None):
     tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))
 
-root = Tk()
-root.title('μChat')
-root.geometry(f'{WIDTH}x{HEIGHT}')
-root.config(background='light gray')
+def notification_listener(message, name):
+    global val
+    notification_frame = Frame(background, bg='white', width=300, height=200)
+    start_x = -300
+    end_x = 50
+    val=100
+    notification_frame.place(x=start_x, y=30)
+    def slide_in(current_x):
+        if current_x < end_x:
+            new_x = min(current_x + 10, end_x)
+            notification_frame.place(x=new_x, y=30)
+            root.after(10, slide_in, new_x)
+        else:
+            root.after(10, change_progress)
+    def change_progress():  
+        global val
+        try:
+            if val != 0:
+                val -= 1
+                progress_bar.config(value=val)
+                root.after(35, change_progress)
+            else:
+                root.after(10, slide_out, end_x)
+        except TclError:
+            pass
+    def slide_out(current_x=end_x):
+        if current_x > start_x:
+            new_x = max(current_x - 10, start_x)
+            notification_frame.place(x=new_x, y=30)
+            root.after(10, slide_out, new_x)
+        else:
+            notification_frame.destroy()
+    title_label = Label(notification_frame, text="μChat New Message", fg='black', bg='white', font=('Arial', 11, 'bold'), anchor=W, justify=LEFT)
+    name_label = Label(notification_frame, text=name, fg='black', bg='white', font=('Arial', 8, 'bold'), anchor=W, justify=LEFT)
+    message_label = Label(notification_frame, text=message[:250], fg='black', bg='white', anchor=W, wraplength=250, justify=LEFT)
+    progress_bar = ttk.Progressbar(notification_frame, orient=HORIZONTAL, length=300,value=100)
+    backbtn = Button(notification_frame, text="X", command=slide_out, bg="red", fg="white", width=4, height=1)
+    backbtn.place(x=250, y=10)
+    title_label.pack(pady=5, padx=5, anchor=W)
+    name_label.pack(pady=5, padx=5, anchor=W)
+    message_label.pack(pady=5, padx=5, anchor=W)
+    progress_bar.pack(pady=5, padx=5, anchor=W)
+    slide_in(start_x)
+
 root.bind("<Return>", send)
 root.resizable(False, False)
+background = Toplevel(root)
+background.title('')
+background.geometry(f'{root.winfo_width()}x{root.winfo_height()}')
+background.config(background='pink')
+background.attributes('-fullscreen', True)
+background.attributes('-topmost', True)
+background.wm_attributes('-transparentcolor', "pink")
 autoscroll = IntVar(value=1)
 text_variable_stick = IntVar(value=0)
 stick = IntVar(value=0)
-headertxt = Label(text=f'Room ID : {chatID}', background="light gray", width=47, anchor=W, font=('Arial', 8))
-tbxmaincanvas = Canvas(master=root, bg='white', width=390, height=352)
-tbxmaincanvas.place(x=12, y=50)
+headertxt = Label(text=f'Room ID : {chatID}', background="light gray", width=68, anchor=W, font=('Arial', 8))
+tbxmaincanvas = Canvas(master=root, bg='white', width=618, height=350)
+tbxmaincanvas.place(x=12, y=45)
 tbxscrollbar = Scrollbar(master=root, orient=VERTICAL, command=tbxmaincanvas.yview)
 tbxmaincanvas.configure(yscrollcommand=tbxscrollbar.set)
-tbxscrollbar.place(x=410, y=50, height=355)
+tbxscrollbar.place(x=640, y=45, height=353)
 tbxmain = Frame(master=tbxmaincanvas, bg='white')
 tbxmain_window = tbxmaincanvas.create_window((0, 0), window=tbxmain, anchor='nw')
 tbxmain.bind("<Configure>", update_scroll)
 autoscchbx = Checkbutton(variable=autoscroll, text='Scroll to bottom', bg='light gray')
 sticktocorner = Checkbutton(variable=stick, text='Pin to corner', bg='light gray')
-ymstbx = Text(width=30, height=1)
-ymstbx.place(x=10, y=420)
-sbtn = Button(text='>>', width=4, height=1, background='orange', fg='black', font=('Arial', 8), command=send)
-audiobtn = Button(text='LISTEN', width=7, height=1, background='orange', fg='black', font=('Arial', 8), command=enable_audio)
+ymstbx = Text(width=49, height=2)
+ymstbx.place(x=12, y=405)
+sbtn = Button(text='>>', width=5, height=2, background='orange', fg='black', font=('Arial', 8), command=send)
+audiobtn = Button(text='LISTEN', width=6, height=1, background='orange', fg='black', font=('Arial', 8), command=enable_audio)
 micbtn = Button(text='TALK', width=5, height=1, background='orange', fg='black', font=('Arial', 8), command=enable_mic)
 imagebtn = Button(text='IMAGE', width=6, height=1, background='orange', fg='black', font=('Arial', 8), command=attach_image)
-destbtn = Button(text='DESTRUCT', width=12, height=1, background='orange', fg='black', font=('Arial', 8), command=destruct_chat)
-sbtn.place(x=390, y=418)
-autoscchbx.place(x=10, y=450)
-sticktocorner.place(x=10, y=480)
+destbtn = Button(text='DESTRUCT', width=13, height=1, background='orange', fg='black', font=('Arial', 8), command=destruct_chat)
+loadhistbtn = Button(text='LOAD HISTORY', width=15, height=1, background='orange', fg='black', font=('Arial', 8), command=load_history)
+sbtn.place(x=612, y=405)
+autoscchbx.place(x=12, y=455)
+sticktocorner.place(x=12, y=482)
 headertxt.place(x=12, y=11)
-audiobtn.place(x=300, y=465)
-micbtn.place(x=380, y=465)
-imagebtn.place(x=230, y=465)
-destbtn.place(x=320, y=11)
+loadhistbtn.place(x=315, y=465)
+imagebtn.place(x=468, y=465)
+audiobtn.place(x=603, y=465)
+micbtn.place(x=540, y=465)
+destbtn.place(x=540, y=7)
 
 if noinputoutput:
     audiobtn.config(state=DISABLED, bg='grey')
@@ -523,6 +661,7 @@ if noinputoutput:
     audio_enabled = False
 
 windowmanager()
+
 Thread(target=receive, daemon=True).start()
 Thread(target=header, daemon=True).start()
 Thread(target=voice_sender, daemon=True).start()
