@@ -9,9 +9,9 @@ VOICE_PORT = 2082
 CHAT_PORT = 2052
 DESTRUCTION_LISTENER_PORT = 2053
 PORT_MESSAGE_HISTORY = 2054
-DESTRUCTOR_PASSWORD = 'ilikemicrochat2026'
+DESTRUCTOR_PASSWORD = 'nopassword'
 
-ROOMS_DIR = os.path.join(os.path.dirname(__file__), "rooms_WAN")
+ROOMS_DIR = os.path.join(os.path.dirname(__file__), "rooms")
 if not os.path.exists(ROOMS_DIR):
     os.makedirs(ROOMS_DIR)
 
@@ -167,6 +167,9 @@ def broadcast_message_to_client(client_socket):
                 message_type = data["message_type"]
                 name = data["name"]
                 description = data["description"]
+                time = data["time"]
+                date = data["date"]
+                client_id = data["client_id"]
 
                 if str(idvisible) == 'True' and chatID not in visiblerooms:
                     visiblerooms.append(chatID)
@@ -180,6 +183,9 @@ def broadcast_message_to_client(client_socket):
                     "data": msg,
                     "name": name,
                     "description": description,
+                    "time" : time,
+                    "date" : date,
+                    "client_id" : client_id
                 }
 
                 message_histories[chatID].append(out_data)
@@ -191,9 +197,9 @@ def broadcast_message_to_client(client_socket):
                 payload = (dumps(out_data) + "\n").encode("utf-8")
 
                 if message_type == "text_message":
-                    print(f"{chatID} {name} : \n{data['data']}")
+                    print(f"{time} - {date} {chatID} {name} : \n{data['data']}")
                 if message_type == "image_message":
-                    print(f"{chatID} {name} : \n 1 image + {data['description']}")
+                    print(f"{time} - {date} {chatID} {name} : \n 1 image + {data['description']}")
 
                 for c in list(clientlist.keys()):
                     if clientlist[c] == chatID:
