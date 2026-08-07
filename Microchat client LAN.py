@@ -1,27 +1,30 @@
 from socket import socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOCK_DGRAM
-from tkinter.messagebox import showerror, showwarning, askyesnocancel, showinfo
+from tkinter.messagebox import showerror, showwarning, askyesnocancel
 from tkinter import *
 from tkinter import ttk
 from tkinter import filedialog
-from time import time, sleep
-from pyautogui import prompt
+from time import time, sleep, localtime
+from pyautogui import password
 from threading import Thread
 from random import choice
 from queue import Queue
 from pyaudio import PyAudio, paInt32
 from json import loads, dumps
-import base64
+from base64 import b64encode, b64decode
 from PIL import Image, ImageTk
-import io
+from io import BytesIO
+from uuid import uuid4
+from os import path
 
 WIDTH, HEIGHT = 680, 520
+HOST = ""
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_PING = 2086
 PORT_DELETE = 2053
-PORT_MESSAGE_HISTORY = 2054
 PORT_FINDER = 4488
-HOST = None
+PORT_MESSAGE_HISTORY = 2054
+CONFIG_FILE = path.join(path.dirname(__file__), "config.json")
 
 connect = 0
 nickname = ''
@@ -37,16 +40,7 @@ image_attached = False
 attached_image = None
 chat_destroyed = False
 connection_attempts = 0
-
-def create_a_name(availableclies):
-    data = [0,1,2,3,4,5,6,7,8,9]
-    nickname = str(choice(data))
-    for i in range(6):
-        nickname = nickname + str(choice(data))
-    while nickname in availableclies:
-        nickname = create_a_name(availableclies)
-        return
-    return nickname
+serverfound = False
 
 root = Tk()
 root.withdraw()
@@ -73,9 +67,10 @@ try :
                 break
         except Exception as x:
             sleep(0.2)
+            connection_attempts += 1
     else :
         if serverfound == False :
-            showerror(title='μChat', message='Server not found or broadcast packets are blocked.')
+            showerror(title='μChat', message='No server is currently listening. or broadcasting is disabled on this network.')
             quit()
 except Exception as e:
     showerror(title='μChat', message=f'Cannot find any listening server.\nErr : {e}')
@@ -91,6 +86,32 @@ try:
 except Exception as e:
     showerror(title='μChat', message=f'Cannot connect to server.\nErr : {e}')
     quit()
+
+if path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            config = loads(f.read())
+            client_id = config.get("client_id")
+            if not client_id:
+                raise ValueError("client_id key missing")
+    except Exception:
+        client_id = str(uuid4())
+        with open(CONFIG_FILE, "w") as f:
+            f.write(dumps({"client_id": client_id}, indent=4))
+else:
+    client_id = str(uuid4())
+    with open(CONFIG_FILE, "w") as f:
+        f.write(dumps({"client_id": client_id}, indent=4))
+
+def create_an_ID(availableclies):
+    data = [0,1,2,3,4,5,6,7,8,9]
+    nickname = str(choice(data))
+    for i in range(6):
+        nickname = nickname + str(choice(data))
+    while nickname in availableclies:
+        nickname = create_an_ID(availableclies)
+        return
+    return nickname
 
 def show_login_dialog():
     global chatID, nickname, id_visible, connectedormaderoom
@@ -155,7 +176,7 @@ def show_login_dialog():
             if not nick:
                 showerror(title='μChat', message='Nickname cannot be empty.', parent=logindiag)
                 return
-            chatID = create_a_name(availableclies)
+            chatID = create_an_ID(availableclies)
             nickname = nick
             id_visible = id_visible_var.get()
             connectedormaderoom = False
@@ -165,6 +186,12 @@ def show_login_dialog():
         Button(btn_frame, text="Create", command=create_room, bg="green", fg="white", width=10).pack(side="left", padx=15)
         Button(btn_frame, text="Cancel", command=lambda: (logindiag.destroy(), quit()), bg="red", fg="white", width=10).pack(side="right", padx=15)
     root.wait_window(logindiag)
+
+def gettimestamp():
+    return f"{localtime()[3]}:{localtime()[4]}:{localtime()[5]}"
+
+def getdatestamp():
+    return f"{localtime()[2]}/{localtime()[1]}/{localtime()[0]}"
 
 while not (chatID and nickname):
     show_login_dialog()
@@ -179,6 +206,9 @@ try:
         "message_type": "text_message",
         "name": nickname,
         "description": "none",
+        "time" : gettimestamp(),
+        "date" : getdatestamp(),
+        "client_id" : client_id
     }
     client.sendall((str(dumps(data)) + "\n").encode("utf-8"))
 except Exception as e:
@@ -205,32 +235,57 @@ def clear_chat_frame():
         widget.destroy()
     update_scroll()
 
-def create_new_message_bubble(message, message_type, name, description=""):
+def create_new_message_bubble(message, message_type, name, description="",time="--:--", date="--/--/----",client_id_num="unknown"):
+    global client_id
     if message_type == "text_message":
         text = f"{message}"
-        bubble_frame = Frame(tbxmain, bg='light green', width=620)
-        name_label = Label(bubble_frame, text=name, fg='black', bg='light green', font=('Arial', 8, 'bold'), anchor=W, justify=LEFT)
+        anchor=W
+        bg_color = 'light blue'
+        if client_id_num == client_id:
+            bg_color = 'light green'
+            anchor = E
+        else:
+            bg_color = 'light blue'
+            anchor = W
+        bubble_frame = Frame(tbxmain, bg=bg_color, width=620)
+        name_label = Label(bubble_frame, text=name, fg='black', bg=bg_color, font=('Arial', 8, 'bold'), anchor=W)
         name_label.pack(pady=(5, 0), padx=5, anchor=W)
-        message_label = Label(bubble_frame, text=text, fg='black', bg='light green', anchor=W, wraplength=580, justify=LEFT)
+        message_label = Label(bubble_frame, text=text, fg='black', bg=bg_color, anchor=W, wraplength=580, justify=LEFT)
         message_label.pack(pady=5, padx=5, anchor=W)
-        bubble_frame.pack(pady=4, padx=8, anchor=W)
+        date_label = Label(bubble_frame, text=f"{date}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
+        date_label.pack(pady=(5, 0), padx=5, anchor=W)
+        time_label = Label(bubble_frame, text=f"{time}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
+        time_label.pack(pady=(0,5), padx=5, anchor=W)
+        bubble_frame.pack(pady=4, padx=8, anchor=anchor)
         update_scroll()
     elif message_type == "image_message":
         try:
-            image_bytes = base64.b64decode(message)
-            raw_img = Image.open(io.BytesIO(image_bytes))
+            anchor=W
+            bg_color = 'light blue'
+            if client_id_num == client_id:
+                bg_color = 'light green'
+                anchor = E
+            else:
+                bg_color = 'light blue'
+                anchor = W
+            image_bytes = b64decode(message)
+            raw_img = Image.open(BytesIO(image_bytes))
             raw_img.thumbnail((550, 440))
             tk_img = ImageTk.PhotoImage(raw_img)
-            bubble_frame = Frame(tbxmain, bg='light green', width=620)
-            name_label = Label(bubble_frame, text=f"{name} :", fg='black', bg='light green', font=('Arial', 8, 'bold'), anchor=W)
+            bubble_frame = Frame(tbxmain, bg=bg_color, width=620)
+            name_label = Label(bubble_frame, text=f"{name} :", fg='black', bg=bg_color, font=('Arial', 8, 'bold'), anchor=W)
             name_label.pack(pady=(5, 2), padx=5, anchor=W)
-            img_label = Label(bubble_frame, image=tk_img, bg='light green')
+            img_label = Label(bubble_frame, image=tk_img, bg=bg_color)
             img_label.image = tk_img
             img_label.pack(pady=2, padx=5, anchor=W)
-            if description and description != "none":
-                desc_label = Label(bubble_frame, text=description, fg='black', bg='light green', anchor=W, wraplength=580, justify=LEFT)
+            if description and description != "none" and description != "":
+                desc_label = Label(bubble_frame, text=description, fg='black', bg=bg_color, anchor=W, wraplength=580, justify=LEFT)
                 desc_label.pack(pady=(2, 5), padx=5, anchor=W)
-            bubble_frame.pack(pady=4, padx=8, anchor=W)
+            date_label = Label(bubble_frame, text=f"{date}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
+            date_label.pack(pady=(5, 0), padx=5, anchor=W)
+            time_label = Label(bubble_frame, text=f"{time}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
+            time_label.pack(pady=(0,5), padx=5, anchor=W)
+            bubble_frame.pack(pady=4, padx=8, anchor=anchor)
             update_scroll()
         except Exception as e:
             print(f"image error: {e}")
@@ -259,7 +314,7 @@ def attach_image():
         def confirm():
             global image_attached, attached_image
             with open(file_path, "rb") as image_file:
-                attached_image = base64.b64encode(image_file.read()).decode('utf-8')
+                attached_image = b64encode(image_file.read()).decode('utf-8')
             image_attached = True
             imagebtn.config(background='green', text='IMAGE')
             preview_win.destroy()
@@ -290,6 +345,9 @@ def send(event=None):
                 "message_type": "image_message",
                 "name": nickname,
                 "description": message if message else "none",
+                "time" : gettimestamp(),
+                "date" : getdatestamp(),
+                "client_id" : client_id
             }
             client.sendall((dumps(data) + "\n").encode("utf-8"))
             attached_image = None
@@ -304,6 +362,9 @@ def send(event=None):
                 "message_type": "text_message",
                 "name": nickname,
                 "description": "none",
+                "time" : gettimestamp(),
+                "date" : getdatestamp(),
+                "client_id" : client_id
             }
             client.sendall((dumps(data) + "\n").encode("utf-8"))
             ymstbx.delete(1.0, END)
@@ -313,7 +374,7 @@ def send(event=None):
         alreadysending = False
 
 def destruct_chat():
-    pwd = prompt(title='μChat', text='Enter destruction password:')
+    pwd = password(title='μChat', text='Enter destruction password:')
     if not pwd:
         return
     try:
@@ -361,7 +422,7 @@ def handle_room_destruction():
     root.destroy()
 
 def receive():
-    global alreadysending, image_attached
+    global alreadysending, image_attached,client_id
     buffer = ""
     while True:
         try:
@@ -384,9 +445,12 @@ def receive():
 
                 message = data["data"]
                 name = data["name"]
-                description = data.get("description", "none")
+                description = data.get("description", "")
+                time = data.get("time", "--:--")
+                date = data.get("date", "--/--/----")
+                client_id_num = data.get("client_id", "unknown")
                 
-                create_new_message_bubble(message, message_type, name, description)
+                create_new_message_bubble(message=message, message_type=message_type, name=name, description=description, time=time, date=date, client_id_num=client_id_num)
                 tbxmaincanvas.update_idletasks()
                 tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))
                 
@@ -450,9 +514,9 @@ def load_history():
         progressbar.config(value=90)
         for msg in history:
             if msg.get("message_type") == "text_message":
-                create_new_message_bubble(msg.get("data"), msg.get("message_type"), msg.get("name"), msg.get("description"))
+                create_new_message_bubble(message=msg.get("data"), message_type=msg.get("message_type"), name=msg.get("name"), description=msg.get("description"), time=msg.get("time"), date=msg.get("date"), client_id_num=msg.get("client_id"))
             elif msg.get("message_type") == "image_message":
-                create_new_message_bubble(name=msg.get("name"), message=msg.get("data"), message_type="image_message", description=msg.get("description"))
+                create_new_message_bubble(name=msg.get("name"), message=msg.get("data"), message_type="image_message", description=msg.get("description"), time=msg.get("time"), date=msg.get("date"),client_id_num=msg.get("client_id"))
         progressbar.config(value=95)
         sock.close()
         progressbar.config(value=100)
@@ -655,6 +719,9 @@ text_variable_stick = IntVar(value=0)
 stick = IntVar(value=0)
 headertxt = Label(text=f'Room ID : {chatID}', background="light gray", width=68, anchor=W, font=('Arial', 8))
 tbxmaincanvas = Canvas(master=root, bg='white', width=618, height=350)
+def sync_frame_width(event):
+    tbxmaincanvas.itemconfig(tbxmain_window, width=event.width)
+tbxmaincanvas.bind("<Configure>", sync_frame_width)
 tbxmaincanvas.place(x=12, y=45)
 tbxscrollbar = Scrollbar(master=root, orient=VERTICAL, command=tbxmaincanvas.yview)
 tbxmaincanvas.configure(yscrollcommand=tbxscrollbar.set)
