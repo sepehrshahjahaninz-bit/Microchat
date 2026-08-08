@@ -1,4 +1,4 @@
-from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_REUSEADDR
+from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_REUSEADDR, SOCK_DGRAM
 from threading import Thread, Lock
 from json import dumps, loads
 from time import localtime
@@ -9,6 +9,7 @@ VOICE_PORT = 2082
 CHAT_PORT = 2052
 DESTRUCTION_LISTENER_PORT = 2053
 PORT_MESSAGE_HISTORY = 2054
+TYPING_PORT = 2055
 DESTRUCTOR_PASSWORD = 'nopassword'
 
 ROOMS_DIR = os.path.join(os.path.dirname(__file__), "rooms")
@@ -27,6 +28,7 @@ except Exception as x:
     quit()
 
 clientlist = {}
+typingclientlist = {}
 addrlist = []
 client = False
 voice_clients = {}
@@ -353,10 +355,68 @@ def request_message_history():
         except Exception as e:
             print(f"History request error: {e}")
 
+def accept_typing_client_connection():
+    try:
+        sock = socket(AF_INET, SOCK_STREAM)
+        sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        sock.bind(('', TYPING_PORT))
+        sock.listen()
+    except Exception as x:
+        print(f'\nTyping listener server encountered an error.\n{x}')
+        return
+    while True:
+        try:
+            client_socket, addr = sock.accept()
+            client_socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1) 
+            Thread(target=handle_typing_client, args=(client_socket,), daemon=True).start()
+        except Exception as x:
+            print(f"Typing listener error: {x}")
+
+def handle_typing_client(client):
+    try:
+        while True:
+            data = client.recv(1024).decode("utf-8")
+            if not data:
+                client.close()
+                continue
+            data_dict = loads(data)
+            room_ID = data_dict.get('room_id')
+            name = data_dict.get('name')
+            typing = data_dict.get('typing')
+            client_id = data_dict.get('client_id')
+            if is_room_destructed(room_ID):
+                client.close()
+                continue
+            typingclientlist[client] = room_ID
+            payload = (dumps({
+                "room_id": room_ID,
+                "name": name,
+                "typing": typing,
+                "client_id": client_id
+            }) + "\n").encode("utf-8")
+            for c, r_id in typingclientlist.items():
+                if r_id == room_ID and c != client:
+                    try:
+                        c.sendall(payload)
+                    except Exception:
+                        try:
+                            typingclientlist.pop(c, None)
+                            c.close()
+                        except Exception:
+                            pass
+    except Exception as x:
+        print(f"Typing listener error: {x}")
+    finally:
+        try:
+            typingclientlist.pop(client, None)
+            client.close()
+        except Exception:
+            pass
 
 Thread(target=voice_chat_server, daemon=True).start()
 Thread(target=ping_server, daemon=True).start()
 Thread(target=self_destruction_transmitter, daemon=True).start()
 Thread(target=request_message_history, daemon=True).start()
+Thread(target=accept_typing_client_connection, daemon=True).start()
 
 accept_client_connection()

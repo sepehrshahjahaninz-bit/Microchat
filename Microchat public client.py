@@ -1,5 +1,5 @@
-from socket import socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY
-from tkinter.messagebox import showerror, showwarning, askyesnocancel
+from socket import socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOCK_DGRAM, SOL_SOCKET, SO_REUSEADDR
+from tkinter.messagebox import showerror, showwarning, askyesnocancel, askyesno
 from tkinter import *
 from tkinter import ttk
 from tkinter import filedialog
@@ -16,13 +16,14 @@ from io import BytesIO
 from uuid import uuid4
 from os import path
 
-WIDTH, HEIGHT = 680, 520
-HOST = "chat.shahjahani.com"
+WIDTH, HEIGHT = 680, 550
+HOST = "127.0.0.1"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_PING = 2086
 PORT_DELETE = 2053
 PORT_MESSAGE_HISTORY = 2054
+PORT_TYPING = 2055
 CONFIG_FILE = path.join(path.dirname(__file__), "config.json")
 
 connect = 0
@@ -39,6 +40,8 @@ image_attached = False
 attached_image = None
 chat_destroyed = False
 muted = False
+typing_socket = None
+active_typers = {}
 
 root = Tk()
 root.withdraw()
@@ -94,11 +97,35 @@ def show_login_dialog():
     logindiag.geometry('460x250')
     logindiag.resizable(False, False)
     if a is True:
-        toplabel = Label(logindiag, text="Enter the room ID to join.", font=("Arial", 10), fg='black')
+        toplabel = Label(logindiag, text="Choose a room to join or enter the room ID.", font=("Arial", 10), fg='black', wraplength=400)
         toplabel.pack(anchor=W, padx=10, pady=(5, 0))
-        publicrooms = Label(logindiag, text=f"Available rooms: {visiblerooms}", font=("Arial", 9), fg='black',wraplength=400)
-        publicrooms.pack(anchor=W, padx=10)
-        Label(logindiag, text="Room ID:").pack(anchor=W, padx=10)
+        container = Frame(logindiag, width=440, height=160, bg='white')
+        container.pack(anchor=W, padx=10, pady=5)
+        container.pack_propagate(False)
+        roomlistcanvas = Canvas(container, highlightthickness=0, bg='white')
+        def scroll_handler(*args):
+            if args[0] == 'moveto':
+                roomlistcanvas.yview_moveto(args[1])
+            elif args[0] == 'scroll':
+                roomlistcanvas.yview_scroll(int(args[1]), args[2])
+        v_scrollbar = Scrollbar(container, orient="vertical", command=scroll_handler)
+        roomlistcanvas.configure(yscrollcommand=v_scrollbar.set)
+        inner_frame = Frame(roomlistcanvas, bg='white')
+        inner_frame.bind("<Configure>", lambda e: roomlistcanvas.configure(scrollregion=roomlistcanvas.bbox("all")))
+        roomlistcanvas.create_window((0, 0), window=inner_frame, anchor="nw")
+        v_scrollbar.pack(side=RIGHT, fill=Y)
+        roomlistcanvas.pack(side=LEFT, fill=BOTH, expand=True)
+        max_per_column = 10
+        for index, room in enumerate(visiblerooms):
+            current_col = index // max_per_column
+            current_row = index % max_per_column
+            roomslistbox = Frame(inner_frame, bg='white')
+            roomlabel = Label(roomslistbox, text=room, font=("Arial", 10),bg="white", fg='black', wraplength=100)
+            joinbtn = Button(roomslistbox,command=lambda r=room: validate(r), text="Join", font=("Arial", 8), fg='white', bg='green', width=6)
+            roomlabel.pack(side=LEFT, padx=(0, 2))
+            joinbtn.pack(side=LEFT)
+            roomslistbox.grid(row=current_row, column=current_col, sticky=W, padx=8, pady=2)
+        Label(logindiag, text="Room ID:", font=("Arial", 10), fg='black').pack(anchor=W, padx=10)
         idfield = Entry(logindiag, width=50)
         idfield.pack(anchor=W, padx=10)
         idfield.focus()
@@ -106,9 +133,12 @@ def show_login_dialog():
         nicknamefield = Entry(logindiag, width=50)
         nicknamefield.pack(anchor=W, padx=10)
         id_visible_var = BooleanVar(value=True)
-        def validate():
+        def validate(id=None):
             global chatID, nickname, id_visible, connectedormaderoom
-            r_id = idfield.get().strip()
+            if id is None:
+                r_id = idfield.get().strip()
+            else:
+                r_id = id
             nick = nicknamefield.get().strip()
             if not r_id:
                 showerror(title='μChat', message='Room ID cannot be empty.', parent=logindiag)
@@ -206,6 +236,41 @@ def clear_chat_frame():
         widget.destroy()
     update_scroll()
 
+def copy_to_clipboard(text):
+    root.clipboard_clear()
+    root.clipboard_append(text) 
+
+def del_message(bubble_frame):
+    choice = askyesno(title='μChat', message='Are you sure you want to delete this message for yourself?\nThis action only removes the messsage from current session\nand can be restored using load history.')
+    if choice:
+        bubble_frame.destroy()
+    else:
+        return
+
+def save_image(image):
+    filename = filedialog.asksaveasfilename(
+        title="Save Image",
+        defaultextension=".png",
+        filetypes=[
+            ("PNG Image", "*.png"),
+            ("JPEG Image", "*.jpg;*.jpeg"),
+            ("Bitmap Image", "*.bmp"),
+            ("All Files", "*.*")
+        ],
+        initialfile=f"microchat_image.png"
+    )
+    if not filename:
+        return
+    try:
+        if filename.lower().endswith(('.jpg', '.jpeg')) and image.mode in ('RGBA', 'LA'):
+            converted_img = Image.new("RGB", image.size, (255, 255, 255))
+            converted_img.paste(image, mask=image.split()[-1])
+            converted_img.save(filename)
+        else:
+            image.save(filename)
+    except Exception as e:
+        showerror(title='μChat', message=f"Failed to save image:\n{e}")
+
 def create_new_message_bubble(message, message_type, name, description="",time="--:--", date="--/--/----",client_id_num="unknown"):
     global client_id
     if message_type == "text_message":
@@ -223,6 +288,12 @@ def create_new_message_bubble(message, message_type, name, description="",time="
         name_label.pack(pady=(5, 0), padx=5, anchor=W)
         message_label = Label(bubble_frame, text=text, fg='black', bg=bg_color, anchor=W, wraplength=580, justify=LEFT)
         message_label.pack(pady=5, padx=5, anchor=W)
+        btn_frame = Frame(bubble_frame, bg=bg_color)
+        copybtn = Button(btn_frame, text="COPY", command=lambda: copy_to_clipboard(text), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
+        delbtn = Button(btn_frame, text="DELETE", command=lambda: del_message(bubble_frame), bg="red", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
+        copybtn.pack(side=LEFT, padx=(0, 5))
+        delbtn.pack(side=LEFT, padx=(0, 5))
+        btn_frame.pack(pady=5, padx=5, anchor=W)
         date_label = Label(bubble_frame, text=f"{date}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
         date_label.pack(pady=(5, 0), padx=5, anchor=W)
         time_label = Label(bubble_frame, text=f"{time}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
@@ -252,6 +323,14 @@ def create_new_message_bubble(message, message_type, name, description="",time="
             if description and description != "none" and description != "":
                 desc_label = Label(bubble_frame, text=description, fg='black', bg=bg_color, anchor=W, wraplength=580, justify=LEFT)
                 desc_label.pack(pady=(2, 5), padx=5, anchor=W)
+            btn_frame = Frame(bubble_frame, bg=bg_color)
+            copybtn = Button(btn_frame, text="COPY", command=lambda: copy_to_clipboard(description), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
+            saveimagebtn = Button(btn_frame, text="SAVE", command=lambda: save_image(raw_img), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
+            delbtn = Button(btn_frame, text="DELETE", command=lambda: del_message(bubble_frame), bg="red", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
+            copybtn.pack(side=LEFT, padx=(0, 5))
+            saveimagebtn.pack(side=LEFT, padx=(0, 5))
+            delbtn.pack(side=LEFT, padx=(0, 5))
+            btn_frame.pack(pady=5, padx=5, anchor=W)
             date_label = Label(bubble_frame, text=f"{date}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
             date_label.pack(pady=(5, 0), padx=5, anchor=W)
             time_label = Label(bubble_frame, text=f"{time}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
@@ -365,13 +444,10 @@ def handle_room_destruction():
     if chat_destroyed:
         return
     chat_destroyed = True
-
     clear_chat_frame()
     headertxt.config(text="Room was destructed!", fg='red')
-
     voice_enabled = False
     audio_enabled = False
-
     ymstbx.config(state=DISABLED)
     sbtn.config(state=DISABLED, bg='grey')
     audiobtn.config(state=DISABLED, bg='grey')
@@ -379,7 +455,6 @@ def handle_room_destruction():
     imagebtn.config(state=DISABLED, bg='grey')
     destbtn.config(state=DISABLED, bg='grey')
     loadhistbtn.config(state=DISABLED, bg='grey')
-
     try:
         client.close()
     except Exception:
@@ -388,9 +463,83 @@ def handle_room_destruction():
         voicesocket.close()
     except Exception:
         pass
-
     showerror(title='μChat', message='This chat has been destructed.')
     root.destroy()
+
+def connect_typing_socket():
+    global typing_socket
+    try:
+        sock = socket(AF_INET, SOCK_STREAM)
+        sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+        sock.connect((HOST, PORT_TYPING))
+        typing_socket = sock
+        Thread(target=typing_receiver, daemon=True).start()
+    except Exception as e:
+        showwarning(title='μChat', message=f'Can\'t connect to typing service.\n{e}')
+
+def typing_sender(event=None,is_typing=True):
+    global chatID, nickname, client_id, typing_socket
+    try:
+        if not typing_socket:
+            return
+        payload = {
+            "room_id": chatID,
+            "name": nickname,
+            "typing": is_typing,
+            "client_id": client_id
+        }
+        typing_socket.sendall((dumps(payload) + "\n").encode("utf-8"))
+    except Exception as e:
+        print(f'Typing sender error: {e}')
+
+def update_typing_label():
+    names = list(active_typers.keys())
+    if not names:
+        typing_status_label.config(text="", fg='gray')
+    elif len(names) == 1:
+        typing_status_label.config(text=f"{names[0]} is typing...", fg='red')
+    else:
+        typing_status_label.config(text=", ".join(names) + " are typing...", fg='red')
+
+def remove_typer(name):
+    global active_typers
+    if name in active_typers:
+        # Only remove if it hasn't been refreshed by a newer keystroke
+        active_typers.pop(name, None)
+        root.after(0, update_typing_label)
+
+def typing_receiver():
+    global typing_socket, active_typers
+    sock = typing_socket
+    if not sock:
+        return
+    buffer = ""
+    while True:
+        try:
+            chunk = sock.recv(4096).decode("utf-8")
+            if not chunk:
+                break
+            buffer += chunk
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                data = loads(line)
+                room_id = data.get("room_id")
+                name = data.get("name")
+                is_typing = data.get("typing")
+                sender_client_id = data.get("client_id")
+                if room_id == chatID and sender_client_id != client_id:
+                    if is_typing:
+                        active_typers[name] = True
+                        root.after(0, update_typing_label)
+                        root.after(1500, lambda n=name: remove_typer(n))
+                    else:
+                        root.after(0, lambda n=name: remove_typer(n))
+        except Exception as e:
+            print(f"Typing receiver error: {e}")
+            break
 
 def receive():
     global alreadysending, image_attached,client_id
@@ -437,12 +586,14 @@ def receive():
                 sticktocorner.config(bg='green')
                 headertxt.config(bg='green')
                 headertxt.config(fg='black')
+                typing_status_label.config(bg='green')
                 sleep(0.1)
                 root.config(bg='light grey')
                 autoscchbx.config(bg='light grey')
                 sticktocorner.config(bg='light grey')
                 headertxt.config(bg='light grey')
                 headertxt.config(fg='green')
+                typing_status_label.config(bg='light grey')
                 ymstbx.focus()
                 alreadysending = False
                 image_attached = False
@@ -517,6 +668,7 @@ def header():
             ping = '-1'
             headertxt.config(fg='green')
         headertxt.config(text=f'Room ID : {chatID} | Ping : {ping} ms')
+        pingprogressbar.config(value=ping)
         sleep(1)
     
 def windowmanager():
@@ -717,17 +869,17 @@ tbxmaincanvas = Canvas(master=root, bg='white', width=618, height=350)
 def sync_frame_width(event):
     tbxmaincanvas.itemconfig(tbxmain_window, width=event.width)
 tbxmaincanvas.bind("<Configure>", sync_frame_width)
-tbxmaincanvas.place(x=12, y=45)
+tbxmaincanvas.place(x=12, y=75)
 tbxscrollbar = Scrollbar(master=root, orient=VERTICAL, command=tbxmaincanvas.yview)
 tbxmaincanvas.configure(yscrollcommand=tbxscrollbar.set)
-tbxscrollbar.place(x=640, y=45, height=353)
+tbxscrollbar.place(x=640, y=75, height=353)
 tbxmain = Frame(master=tbxmaincanvas, bg='white')
 tbxmain_window = tbxmaincanvas.create_window((0, 0), window=tbxmain, anchor='nw')
 tbxmain.bind("<Configure>", update_scroll)
 autoscchbx = Checkbutton(variable=autoscroll, text='Scroll to bottom', bg='light gray')
 sticktocorner = Checkbutton(variable=stick, text='Pin to corner', bg='light gray')
 ymstbx = Text(width=49, height=2)
-ymstbx.place(x=12, y=405)
+ymstbx.place(x=12, y=435)
 sbtn = Button(text='>>', width=5, height=2, background='orange', fg='black', font=('Arial', 8), command=send)
 audiobtn = Button(text='LISTEN', width=6, height=1, background='orange', fg='black', font=('Arial', 8), command=enable_audio)
 micbtn = Button(text='TALK', width=5, height=1, background='orange', fg='black', font=('Arial', 8), command=enable_mic)
@@ -735,16 +887,21 @@ imagebtn = Button(text='IMAGE', width=6, height=1, background='orange', fg='blac
 destbtn = Button(text='DESTRUCT', width=13, height=1, background='orange', fg='black', font=('Arial', 8), command=destruct_chat)
 loadhistbtn = Button(text='LOAD HISTORY', width=15, height=1, background='orange', fg='black', font=('Arial', 8), command=load_history)
 muutebtn = Button(text='MUTE', width=5, height=1, background='orange', fg='black', font=('Arial', 8), command=mute_chat)
-sbtn.place(x=612, y=405)
-autoscchbx.place(x=12, y=455)
-sticktocorner.place(x=12, y=482)
+pingprogressbar = ttk.Progressbar(root, length=200,value=0)
+ymstbx.bind("<KeyPress>", typing_sender)
+typing_status_label = Label(text='', background="light gray", width=72, anchor=W, font=('Arial', 8, 'italic'), fg='gray')
+typing_status_label.place(x=12, y=42)
+sbtn.place(x=612, y=435)
+autoscchbx.place(x=12, y=485)
+sticktocorner.place(x=12, y=512)
 headertxt.place(x=12, y=11)
-loadhistbtn.place(x=315, y=465)
-imagebtn.place(x=468, y=465)
-audiobtn.place(x=603, y=465)
-micbtn.place(x=540, y=465)
-muutebtn.place(x=253, y=465)
+loadhistbtn.place(x=315, y=505)
+imagebtn.place(x=468, y=505)
+audiobtn.place(x=603, y=505)
+micbtn.place(x=540, y=505)
+muutebtn.place(x=253, y=505)
 destbtn.place(x=540, y=7)
+pingprogressbar.place(x=320, y=11)
 
 if noinputoutput:
     audiobtn.config(state=DISABLED, bg='grey')
@@ -758,5 +915,6 @@ Thread(target=receive, daemon=True).start()
 Thread(target=header, daemon=True).start()
 Thread(target=voice_sender, daemon=True).start()
 Thread(target=voice_receiver, daemon=True).start()
+Thread(target=connect_typing_socket, daemon=True).start()
 
 root.mainloop()
