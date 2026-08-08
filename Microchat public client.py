@@ -17,7 +17,7 @@ from uuid import uuid4
 from os import path
 
 WIDTH, HEIGHT = 680, 520
-HOST = "127.0.0.1"
+HOST = "chat.shahjahani.com"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_PING = 2086
@@ -38,6 +38,7 @@ noinputoutput = False
 image_attached = False
 attached_image = None
 chat_destroyed = False
+muted = False
 
 root = Tk()
 root.withdraw()
@@ -424,11 +425,11 @@ def receive():
                 tbxmaincanvas.update_idletasks()
                 tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))
                 
-                if root.state() != 'normal':
+                if root.state() != 'normal' and not muted:
                     if message_type == "text_message":
-                        root.after(0, notification_listener, message, name)
+                        root.after(0, lambda: notification_listener(message=message, name=name, message_type=message_type))
                     elif message_type == "image_message":
-                        root.after(0, notification_listener, f'Image from {name}:\n{description}', name)
+                        root.after(0, lambda: notification_listener(message=message, name=name, message_type=message_type, description=description))
                 if autoscroll.get() == 1:
                     tbxmaincanvas.yview_moveto(1.0)
                 root.config(bg='green')
@@ -529,6 +530,16 @@ def windowmanager():
         root.attributes('-topmost', False)
         root.update_idletasks()
     root.after(1, windowmanager)
+
+def mute_chat() :
+    global muted
+    muted = not muted
+    if muted == True:
+        muutebtn.config(background='green')
+        muutebtn.config(fg='black')
+    else:
+        muutebtn.config(background='orange')
+        muutebtn.config(fg='black')
 
 def place_top_left():
     root.geometry(f"{WIDTH}x{HEIGHT}+0+0")
@@ -631,12 +642,10 @@ def voice_sender():
 def update_scroll(event=None):
     tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))
 
-def notification_listener(message, name):
-    global val
-    notification_frame = Frame(background, bg='white', width=300, height=200)
+def notification_listener(message, name,val=100,message_type="text_message",description=""):
+    notification_frame = Frame(background, bg='white', width=315, height=200)
     start_x = -300
     end_x = 50
-    val=100
     notification_frame.place(x=start_x, y=30)
     def slide_in(current_x):
         if current_x < end_x:
@@ -644,14 +653,13 @@ def notification_listener(message, name):
             notification_frame.place(x=new_x, y=30)
             root.after(10, slide_in, new_x)
         else:
-            root.after(10, change_progress)
-    def change_progress():  
-        global val
+            root.after(10, change_progress,val)
+    def change_progress(val):  
         try:
             if val != 0:
                 val -= 1
                 progress_bar.config(value=val)
-                root.after(35, change_progress)
+                root.after(35, change_progress,val)
             else:
                 root.after(10, slide_out, end_x)
         except TclError:
@@ -663,15 +671,32 @@ def notification_listener(message, name):
             root.after(10, slide_out, new_x)
         else:
             notification_frame.destroy()
+    def open_message():
+        root.deiconify()
+        root.lift()
+        slide_out()
     title_label = Label(notification_frame, text="μChat New Message", fg='black', bg='white', font=('Arial', 11, 'bold'), anchor=W, justify=LEFT)
     name_label = Label(notification_frame, text=name, fg='black', bg='white', font=('Arial', 8, 'bold'), anchor=W, justify=LEFT)
-    message_label = Label(notification_frame, text=message[:250], fg='black', bg='white', anchor=W, wraplength=250, justify=LEFT)
-    progress_bar = ttk.Progressbar(notification_frame, orient=HORIZONTAL, length=300,value=100)
+    if message_type == "text_message":
+        message_label = Label(notification_frame, text=message[:250], fg='black', bg='white', anchor=W, wraplength=250, justify=LEFT)
+    elif message_type == "image_message":
+        image_bytes = b64decode(message)
+        raw_img = Image.open(BytesIO(image_bytes))
+        raw_img.thumbnail((315, 250))
+        tk_img = ImageTk.PhotoImage(raw_img)
+        message_label = Label(notification_frame,image=tk_img, bg='white', anchor=W, wraplength=250, justify=LEFT,width=250)
+        message_label.image=tk_img
+        desc_label = Label(notification_frame, text=description if description != "none" else "", fg='black', bg='white', anchor=W, wraplength=250, justify=LEFT)
+    progress_bar = ttk.Progressbar(notification_frame, orient=HORIZONTAL, length=315,value=100)
     backbtn = Button(notification_frame, text="X", command=slide_out, bg="red", fg="white", width=4, height=1)
-    backbtn.place(x=250, y=10)
+    openbtn = Button(notification_frame, text="^", command=open_message, bg="green", fg="white", width=4, height=1)
+    openbtn.place(x=267, y=55)
+    backbtn.place(x=267, y=5)
     title_label.pack(pady=5, padx=5, anchor=W)
     name_label.pack(pady=5, padx=5, anchor=W)
     message_label.pack(pady=5, padx=5, anchor=W)
+    if message_type == "image_message":
+        desc_label.pack(pady=5, padx=5, anchor=W)
     progress_bar.pack(pady=5, padx=5, anchor=W)
     slide_in(start_x)
 
@@ -709,6 +734,7 @@ micbtn = Button(text='TALK', width=5, height=1, background='orange', fg='black',
 imagebtn = Button(text='IMAGE', width=6, height=1, background='orange', fg='black', font=('Arial', 8), command=attach_image)
 destbtn = Button(text='DESTRUCT', width=13, height=1, background='orange', fg='black', font=('Arial', 8), command=destruct_chat)
 loadhistbtn = Button(text='LOAD HISTORY', width=15, height=1, background='orange', fg='black', font=('Arial', 8), command=load_history)
+muutebtn = Button(text='MUTE', width=5, height=1, background='orange', fg='black', font=('Arial', 8), command=mute_chat)
 sbtn.place(x=612, y=405)
 autoscchbx.place(x=12, y=455)
 sticktocorner.place(x=12, y=482)
@@ -717,6 +743,7 @@ loadhistbtn.place(x=315, y=465)
 imagebtn.place(x=468, y=465)
 audiobtn.place(x=603, y=465)
 micbtn.place(x=540, y=465)
+muutebtn.place(x=253, y=465)
 destbtn.place(x=540, y=7)
 
 if noinputoutput:
