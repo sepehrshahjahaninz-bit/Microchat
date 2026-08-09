@@ -17,7 +17,7 @@ from uuid import uuid4
 from os import path
 
 WIDTH, HEIGHT = 680, 550
-HOST = "127.0.0.1"
+HOST = "chat.shahjahani.com"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_PING = 2086
@@ -40,6 +40,7 @@ image_attached = False
 attached_image = None
 chat_destroyed = False
 muted = False
+saved_nickname = ""
 typing_socket = None
 active_typers = {}
 
@@ -66,16 +67,17 @@ if path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             config = loads(f.read())
             client_id = config.get("client_id")
+            saved_nickname = config.get("nickname")
             if not client_id:
                 raise ValueError("client_id key missing")
     except Exception:
         client_id = str(uuid4())
         with open(CONFIG_FILE, "w") as f:
-            f.write(dumps({"client_id": client_id}, indent=4))
+            f.write(dumps({"client_id": client_id, "nickname": saved_nickname}, indent=4))
 else:
     client_id = str(uuid4())
     with open(CONFIG_FILE, "w") as f:
-        f.write(dumps({"client_id": client_id}, indent=4))
+        f.write(dumps({"client_id": client_id, "nickname": saved_nickname}, indent=4))
 
 def create_an_ID(availableclies):
     data = [0,1,2,3,4,5,6,7,8,9]
@@ -87,8 +89,17 @@ def create_an_ID(availableclies):
         return
     return nickname
 
+def save_nickname(nickname):
+    global saved_nickname
+    saved_nickname = nickname
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            f.write(dumps({"client_id": client_id, "nickname": saved_nickname}, indent=4))
+    except Exception as e:
+        showerror(title='μChat', message=f'Can\'t save nickname.\n{e}')
+
 def show_login_dialog():
-    global chatID, nickname, id_visible, connectedormaderoom
+    global chatID, nickname, id_visible, connectedormaderoom, saved_nickname
     a = askyesnocancel(title='μChat', message='Do you want to join a chat? Click No to create a new room.')
     if a is None:
         quit()
@@ -132,6 +143,8 @@ def show_login_dialog():
         Label(logindiag, text="Nickname:").pack(anchor=W, padx=10)
         nicknamefield = Entry(logindiag, width=50)
         nicknamefield.pack(anchor=W, padx=10)
+        if saved_nickname:
+            nicknamefield.insert(0, saved_nickname)
         id_visible_var = BooleanVar(value=True)
         def validate(id=None):
             global chatID, nickname, id_visible, connectedormaderoom
@@ -151,6 +164,7 @@ def show_login_dialog():
                 nickname = nick
                 connectedormaderoom = True
                 id_visible = id_visible_var.get()
+                save_nickname(nick)
                 logindiag.destroy()
             else:
                 showerror(title='μChat', message='Invalid Room ID.', parent=logindiag)
@@ -168,6 +182,8 @@ def show_login_dialog():
         Label(logindiag, text="Nickname:").pack(anchor=W, padx=10, pady=(5, 0))
         nicknamefield = Entry(logindiag, width=30)
         nicknamefield.pack(anchor=W, padx=10)
+        if saved_nickname:
+            nicknamefield.insert(0, saved_nickname)
         nicknamefield.focus()
         id_visible_var = BooleanVar(value=True)
         Checkbutton(logindiag, text="Room visible publicly", variable=id_visible_var).pack(anchor=W, padx=10, pady=5)
@@ -181,6 +197,7 @@ def show_login_dialog():
             nickname = nick
             id_visible = id_visible_var.get()
             connectedormaderoom = False
+            save_nickname(nick)
             logindiag.destroy()
         btn_frame = Frame(logindiag)
         btn_frame.pack(fill='x', pady=10)
@@ -372,8 +389,8 @@ def attach_image():
             preview_win.destroy()
         btn_frame = Label(preview_win)
         btn_frame.pack(fill='x', pady=10)
-        Button(btn_frame, text="Confirm", command=confirm, bg="#4CAF50", fg="white", width=10).pack(side="left", padx=15)
-        Button(btn_frame, text="Cancel", command=cancel, bg="#f44336", fg="white", width=10).pack(side="right", padx=15)
+        Button(btn_frame, text="Confirm", command=confirm, bg="green", fg="white", width=10).pack(side="left", padx=15)
+        Button(btn_frame, text="Cancel", command=cancel, bg="red", fg="white", width=10).pack(side="right", padx=15)
     except Exception as e:
         showerror(title='μChat', message=f'Failed to load image preview:\n{e}')
 
@@ -490,7 +507,7 @@ def typing_sender(event=None,is_typing=True):
         }
         typing_socket.sendall((dumps(payload) + "\n").encode("utf-8"))
     except Exception as e:
-        print(f'Typing sender error: {e}')
+        pass
 
 def update_typing_label():
     names = list(active_typers.keys())
@@ -504,7 +521,6 @@ def update_typing_label():
 def remove_typer(name):
     global active_typers
     if name in active_typers:
-        # Only remove if it hasn't been refreshed by a newer keystroke
         active_typers.pop(name, None)
         root.after(0, update_typing_label)
 
@@ -538,8 +554,7 @@ def typing_receiver():
                     else:
                         root.after(0, lambda n=name: remove_typer(n))
         except Exception as e:
-            print(f"Typing receiver error: {e}")
-            break
+            pass
 
 def receive():
     global alreadysending, image_attached,client_id
