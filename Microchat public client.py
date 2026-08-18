@@ -24,6 +24,8 @@ PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
 CONFIG_FILE = path.join(path.dirname(__file__), "config.json")
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 2
 
 Connect = 0
 nickname = ''
@@ -40,10 +42,16 @@ chat_destroyed = False
 typesock = None
 muted = False
 saved_nickname = ""
+uploading_image = False
 active_typers = {}
 previous_visibleroomslist = []
 visiblerooms = []
 availableclies = {}
+pending_messages = {}
+pending_messages = {}
+pending_message_data = {}
+message_retry_count = {}
+send_queue = Queue()
 
 if platform == "win32":
     import ctypes
@@ -130,6 +138,89 @@ def save_nickname(nickname):
             f.write(dumps({"client_id": client_id, "nickname": saved_nickname}, indent=4))
     except Exception as e:
         showerror(title='μChat', message=f'Can\'t save nickname.\n{e}')
+
+def mark_message_sent(msg_id):
+    info = pending_messages.pop(msg_id, None)
+    pending_message_data.pop(msg_id, None)
+    message_retry_count.pop(msg_id, None)
+    if not info:
+        return
+    try:
+        if info["bar"]:
+            info["bar"].stop()
+            info["bar"].destroy()
+        info["label"].config(text="Sent", fg='gray', font=('Arial', 6, 'italic'))
+    except TclError:
+        pass
+
+def mark_message_failed(msg_id, err):
+    info = pending_messages.get(msg_id)
+    if not info:
+        return
+    retries = message_retry_count.get(msg_id, 0)
+    if retries < MAX_RETRIES:
+        message_retry_count[msg_id] = retries + 1
+        try:
+            info["label"].config(text=f"Retrying ({retries+1}/{MAX_RETRIES})", fg='orange', font=('Arial', 6, 'italic'))
+        except TclError:
+            pass
+        delay_ms = int(RETRY_BASE_DELAY * (2 ** retries) * 1000)
+        root.after(delay_ms, retry_send, msg_id)
+    else:
+        pending_messages.pop(msg_id, None)
+        pending_message_data.pop(msg_id, None)
+        message_retry_count.pop(msg_id, None)
+        try:
+            if info["bar"]:
+                info["bar"].stop()
+                info["bar"].destroy()
+            info["label"].config(text="Failed to deliver", fg='red', font=('Arial', 6, 'italic'))
+        except TclError:
+            pass
+
+def retry_send(msg_id):
+    if chat_destroyed:
+        return
+    data = pending_message_data.get(msg_id)
+    info = pending_messages.get(msg_id)
+    if not data or not info:
+        return
+    try:
+        info["label"].config(text="Delivering", fg='gray', font=('Arial', 7, 'italic'))
+    except TclError:
+        pass
+    send_queue.put((msg_id, data))
+
+def sender_worker():
+    while True:
+        item = send_queue.get()
+        if item is None:
+            break
+        msg_id, data = item
+        try:
+            client.sendall((dumps(data) + "\n").encode("utf-8"))
+        except Exception as e:
+            root.after(0, mark_message_failed, msg_id, str(e))
+        send_queue.task_done()
+
+def image_uploading_loading_bar():
+    global upload_window, upload_bar
+    upload_window = Toplevel(root)
+    upload_window.title('μChat')
+    upload_window.geometry('300x100')
+    upload_window.resizable(False, False)
+    upload_window.grab_set()
+    upload_bar = ttk.Progressbar(upload_window, orient=HORIZONTAL, length=300, mode='indeterminate')
+    upload_bar.place(x=0, y=30)
+    upload_bar.start(15)
+
+def close_upload_bar():
+    global upload_window, upload_bar
+    try:
+        upload_bar.stop()
+        upload_window.destroy()
+    except Exception:
+        pass
 
 def validate(id=None, logindiag=None, idfield=None, nicknamefield=None, id_visible_var=None):
     global chatID, nickname, id_visible, connectedormaderoom, availableclies, visiblerooms
@@ -331,17 +422,15 @@ def show_login_dialog():
                     continue
                 elif result.get("data") == "rate_limited":
                     showerror(title='μChat', message=f"You have attempted to create too many rooms.\nTry again in {result.get('retry_after')} seconds.", parent=logindiag)
+                    return
+                elif result.get("data") == "room_id_invalid":
+                    showerror(title='μChat', message=f"The generated Room ID is invalid or incompatible to the server.")
+                    return
                 else:
                     showerror(title='μChat', message=f"Couldn't create room.\n{result.get('data')}", parent=logindiag)
-                    quit()
                     return
-            showerror(title='μChat', message="Couldn't create a unique room ID. Please try again.", parent=logindiag)
-            chatID = new_id
-            nickname = nick
-            id_visible = visible
-            connectedormaderoom = False
-            save_nickname(nick)
-            logindiag.destroy()
+            showerror(title='μChat', message="Couldn't create a unique room ID.", parent=logindiag)
+            return
         btn_frame = Frame(logindiag)
         btn_frame.pack(fill='x', pady=10)
         Button(btn_frame, text="Create", command=create_room, bg="green", fg="white", width=10).pack(side="left", padx=15)
@@ -369,7 +458,8 @@ try:
         "description": "none",
         "time" : gettimestamp(),
         "date" : getdatestamp(),
-        "client_id" : client_id
+        "client_id" : client_id,
+        "id": str(uuid4())
     }
     client.sendall((str(dumps(data)) + "\n").encode("utf-8"))
 except Exception as e:
@@ -431,7 +521,25 @@ def save_image(image):
     except Exception as e:
         showerror(title='μChat', message=f"Failed to save image:\n{e}")
 
-def create_new_message_bubble(message, message_type, name, description="",time="--:--", date="--/--/----",client_id_num="unknown"):
+def remove_failed_message(msg_id):
+    info = pending_messages.pop(msg_id, None)
+    pending_message_data.pop(msg_id, None)
+    message_retry_count.pop(msg_id, None)
+    if not info:
+        return
+    try:
+        if info["bar"]:
+            info["bar"].stop()
+            info["bar"].destroy()
+        frame = info.get("frame")
+        if frame:
+            bubble = frame.master
+            bubble.destroy()
+        update_scroll()
+    except TclError:
+        pass
+
+def create_new_message_bubble(message, message_type, name, description="", time="--:--",date="--/--/----", client_id_num="unknown", msg_id=None, pending=False):
     global client_id
     if message_type == "text_message":
         text = f"{message}"
@@ -450,7 +558,7 @@ def create_new_message_bubble(message, message_type, name, description="",time="
         message_label.pack(pady=5, padx=5, anchor=W)
         btn_frame = Frame(bubble_frame, bg=bg_color)
         copybtn = Button(btn_frame, text="COPY", command=lambda: copy_to_clipboard(text), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
-        delbtn = Button(btn_frame, text="DELETE", command=lambda: del_message(bubble_frame), bg="red", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
+        delbtn = Button(btn_frame, text="DELETE", command=lambda: (pending_messages.pop(msg_id, None),pending_message_data.pop(msg_id, None),message_retry_count.pop(msg_id, None),del_message(bubble_frame)), bg="red", fg="white", width=6, height=1, font=('Arial', 6, 'bold'))
         copybtn.pack(side=LEFT, padx=(0, 5))
         delbtn.pack(side=LEFT, padx=(0, 5))
         btn_frame.pack(pady=5, padx=5, anchor=W)
@@ -458,6 +566,17 @@ def create_new_message_bubble(message, message_type, name, description="",time="
         date_label.pack(pady=(5, 0), padx=5, anchor=W)
         time_label = Label(bubble_frame, text=f"{time}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
         time_label.pack(pady=(0,5), padx=5, anchor=W)
+        if msg_id is not None:
+            status_frame = Frame(bubble_frame, bg=bg_color)
+            status_frame.pack(pady=(0, 5), padx=5, anchor=W)
+            status_label = Label(status_frame, text="Delivering" if pending else "Delivered",fg='gray', bg=bg_color, font=('Arial', 7, 'italic'))
+            status_label.pack(side=LEFT)
+            status_bar = None
+            if pending:
+                status_bar = ttk.Progressbar(status_frame, orient=HORIZONTAL, length=100)
+                status_bar.pack(side=LEFT, padx=(8, 0))
+                status_bar.start(10)
+                pending_messages[msg_id] = {"label": status_label, "bar": status_bar, "frame": status_frame}
         bubble_frame.pack(pady=4, padx=8, anchor=anchor)
         update_scroll()
     elif message_type == "image_message":
@@ -486,7 +605,7 @@ def create_new_message_bubble(message, message_type, name, description="",time="
             btn_frame = Frame(bubble_frame, bg=bg_color)
             copybtn = Button(btn_frame, text="COPY", command=lambda: copy_to_clipboard(description), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
             saveimagebtn = Button(btn_frame, text="SAVE", command=lambda: save_image(raw_img), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
-            delbtn = Button(btn_frame, text="DELETE", command=lambda: del_message(bubble_frame), bg="red", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
+            delbtn = Button(btn_frame, text="DELETE", command=lambda: (pending_messages.pop(msg_id, None), del_message(bubble_frame)), bg="red", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
             copybtn.pack(side=LEFT, padx=(0, 5))
             saveimagebtn.pack(side=LEFT, padx=(0, 5))
             delbtn.pack(side=LEFT, padx=(0, 5))
@@ -495,6 +614,17 @@ def create_new_message_bubble(message, message_type, name, description="",time="
             date_label.pack(pady=(5, 0), padx=5, anchor=W)
             time_label = Label(bubble_frame, text=f"{time}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
             time_label.pack(pady=(0,5), padx=5, anchor=W)
+            if msg_id is not None:
+                status_frame = Frame(bubble_frame, bg=bg_color)
+                status_frame.pack(pady=(0, 5), padx=5, anchor=W)
+                status_label = Label(status_frame, text="Delivering" if pending else "Delivered", fg='gray', bg=bg_color, font=('Arial', 6, 'italic'))
+                status_label.pack(side=LEFT)
+                status_bar = None
+                if pending:
+                    status_bar = ttk.Progressbar(status_frame, orient=HORIZONTAL, length=50, mode='indeterminate')
+                    status_bar.pack(side=LEFT, padx=(4, 0))
+                    status_bar.start(10)
+                    pending_messages[msg_id] = {"label": status_label, "bar": status_bar, "frame": status_frame}
             bubble_frame.pack(pady=4, padx=8, anchor=anchor)
             update_scroll()
         except Exception as e:
@@ -538,16 +668,19 @@ def attach_image():
         showerror(title='μChat', message=f'Failed to load image preview:\n{e}')
 
 def send(event=None):
-    global alreadysending, image_attached, attached_image
+    global alreadysending, image_attached, attached_image, uploading_image
     if chat_destroyed:
         return
     try:
         message = ymstbx.get(1.0, 'end-1c').strip()
-        if alreadysending or (message == '' and not image_attached):
+        if message == '' and not image_attached:
             Thread(target=errorsign).start()
             return
-        alreadysending = True
+        msg_id = str(uuid4())
+        time_str = gettimestamp()
+        date_str = getdatestamp()
         if image_attached:
+            uploading_image = True
             data = {
                 "chat_id": chatID,
                 "id_is_visible": id_visible,
@@ -555,15 +688,29 @@ def send(event=None):
                 "message_type": "image_message",
                 "name": nickname,
                 "description": message if message else "none",
-                "time" : gettimestamp(),
-                "date" : getdatestamp(),
-                "client_id" : client_id
+                "time" : time_str,
+                "date" : date_str,
+                "client_id" : client_id,
+                "id": msg_id
             }
-            client.sendall((dumps(data) + "\n").encode("utf-8"))
+            create_new_message_bubble(
+                message=attached_image,
+                message_type="image_message",
+                name=nickname,
+                description=message if message else "none",
+                time=time_str,
+                date=date_str,
+                client_id_num=client_id,
+                msg_id=msg_id,
+                pending=True
+            )
+            pending_message_data[msg_id] = data
+            send_queue.put((msg_id, data))
             attached_image = None
             image_attached = False
             imagebtn.config(background='orange', text='IMAGE')
             ymstbx.delete(1.0, END)
+            uploading_image = False
         else:
             data = {
                 "chat_id": chatID,
@@ -572,11 +719,24 @@ def send(event=None):
                 "message_type": "text_message",
                 "name": nickname,
                 "description": "none",
-                "time" : gettimestamp(),
-                "date" : getdatestamp(),
-                "client_id" : client_id
+                "time" : time_str,
+                "date" : date_str,
+                "client_id" : client_id,
+                "id": msg_id
             }
-            client.sendall((dumps(data) + "\n").encode("utf-8"))
+            create_new_message_bubble(
+                message=message,
+                message_type="text_message",
+                name=nickname,
+                description="none",
+                time=time_str,
+                date=date_str,
+                client_id_num=client_id,
+                msg_id=msg_id,
+                pending=True
+            )
+            pending_message_data[msg_id] = data
+            send_queue.put((msg_id, data))
             ymstbx.delete(1.0, END)
     except Exception as e:
         showerror(title='μChat', message=f"The server is not responding.\nCan't send message.\n{e}")
@@ -729,10 +889,21 @@ def receive():
                 data = loads(raw_data)
                 
                 message_type = data.get("message_type")
+                incoming_id = data.get("id")
                 
                 if message_type in ("room_deleted", "room_destroyed") or data.get("room_destructed"):
                     root.after(0, handle_room_destruction)
                     return
+                elif message_type == "error":
+                    err_id = data.get("id")
+                    if data.get("error") == "message_buffer_too_large":
+                        showerror(title='μChat', message=f"Can't send message.\nmessage buffer is too large.")
+                    elif data.get("error") == "message_too_large":
+                        if err_id:
+                            root.after(0, remove_failed_message, err_id)
+                    else:
+                        showerror(title='μChat', message=f"Can't send message.\n{data.get('error')}")
+                    continue
 
                 message = data["data"]
                 name = data["name"]
@@ -740,11 +911,15 @@ def receive():
                 time = data.get("time", "--:--")
                 date = data.get("date", "--/--/----")
                 client_id_num = data.get("client_id", "unknown")
-                
-                create_new_message_bubble(message=message, message_type=message_type, name=name, description=description, time=time, date=date, client_id_num=client_id_num)
-                tbxmaincanvas.update_idletasks()
-                tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))
-                
+
+                if client_id_num == client_id and incoming_id in pending_messages:
+                    root.after(0, mark_message_sent, incoming_id)
+                else:
+                    root.after(0, lambda m=message, mt=message_type, n=name, d=description, t=time, dt=date, c=client_id_num, i=incoming_id:
+                        create_new_message_bubble(message=m, message_type=mt, name=n, description=d, time=t, date=dt, client_id_num=c, msg_id=i, pending=False))
+
+                root.after(0, lambda: (tbxmaincanvas.update_idletasks(), tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))))
+                                
                 if root.state() != 'normal' and not muted:
                     if message_type == "text_message":
                         root.after(0, lambda: notification_listener(message=message, name=name, message_type=message_type))
@@ -1063,5 +1238,6 @@ Thread(target=voice_sender, daemon=True).start()
 Thread(target=voice_receiver, daemon=True).start()
 Thread(target=typing_receiver, daemon=True).start()
 Thread(target=windowmanager, daemon=True).start()
+Thread(target=sender_worker, daemon=True).start()
 
 root.mainloop()

@@ -21,6 +21,10 @@ BASE_DELAY = 30
 DELAY_MULTIPLIER = 2
 MAXIMUM_ROOMS = 100
 
+# messaze size settings
+
+MAX_BUFFER_SIZE = 1024 * 1024
+
 if not path.exists(ROOMS_DIR):
     makedirs(ROOMS_DIR)
 
@@ -164,6 +168,15 @@ def broadcast_message_to_client(client_socket):
             if not chunk:
                 break
             buffer += chunk
+            if len(buffer) > MAX_BUFFER_SIZE:
+                out_data = {
+                    "message_type": "error",
+                    "room_ID": chatID,
+                    "error": "message_buffer_too_large",
+                }
+                client_socket.sendall((dumps(out_data) + "\n").encode("utf-8"))
+                client_socket.close()
+                return
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 line = line.strip()
@@ -171,6 +184,7 @@ def broadcast_message_to_client(client_socket):
                     continue
                 data = loads(line)
                 chatID = data["chat_id"]
+                msg_id = data.get("id")
                 if is_room_destructed(chatID):
                     destruction_msg = (dumps({
                         "message_type": "room_destroyed",
@@ -184,17 +198,19 @@ def broadcast_message_to_client(client_socket):
                     out_data = {
                         "message_type": "room_does_not_exist",
                         "room_ID": chatID,
+                        "id" : msg_id
                     }
                     client_socket.sendall((dumps(out_data) + "\n").encode("utf-8"))
                     client_socket.close()
                     return
-                msg = data["data"]
-                message_type = data["message_type"]
-                name = data["name"]
-                description = data["description"]
-                time = data["time"]
-                date = data["date"]
-                client_id = data["client_id"]
+                msg = data.get("data")
+                message_type = data.get("message_type")
+                name = data.get("name")
+                description = data.get("description", "none")
+                time = data.get("time", "--:--")
+                date = data.get("date", "--/--/----")
+                client_id = data.get("client_id")
+                msg_id = data.get("id")
                 clientlist[client_socket] = chatID
                 if chatID not in message_histories:
                     message_histories[chatID] = []
@@ -205,7 +221,8 @@ def broadcast_message_to_client(client_socket):
                     "description": description,
                     "time": time,
                     "date": date,
-                    "client_id": client_id
+                    "client_id": client_id,
+                    "id": msg_id
                 }
                 message_histories[chatID].append(out_data)
                 if len(message_histories[chatID]) > 100:
@@ -450,6 +467,20 @@ def create_room(client_socket, data):
                 "request": "create_room",
                 "data": "rate_limited",
                 "retry_after": round(wait_time, 1)
+            }) + "\n").encode("utf-8"))
+            client_socket.close()
+            return
+        elif not isinstance(room_to_make, str) or not room_to_make.isdigit():
+            client_socket.sendall((dumps({
+                "request": "create_room",
+                "data": "room_id_invalid",
+            }) + "\n").encode("utf-8"))
+            client_socket.close()
+            return
+        elif len(room_to_make) != 7:
+            client_socket.sendall((dumps({
+                "request": "create_room",
+                "data": "room_id_invalid",
             }) + "\n").encode("utf-8"))
             client_socket.close()
             return
