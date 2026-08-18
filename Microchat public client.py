@@ -1,11 +1,11 @@
-from socket import socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOCK_DGRAM, SOL_SOCKET, SO_REUSEADDR
+from socket import socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY
 from tkinter.messagebox import showerror, showwarning, askyesnocancel, askyesno
 from tkinter import *
 from tkinter import ttk
 from tkinter import filedialog
 from time import time, sleep, localtime
 from pyautogui import password
-from threading import Thread
+from threading import Thread, Event as T_Event
 from random import choice
 from queue import Queue
 from pyaudio import PyAudio, paInt32
@@ -15,22 +15,20 @@ from PIL import Image, ImageTk
 from io import BytesIO
 from uuid import uuid4
 from os import path
+from sys import platform
+from queue import Queue, Empty
 
 WIDTH, HEIGHT = 680, 550
-HOST = "chat.shahjahani.com"
+HOST = "application-hosts.shahjahani.com"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
-PORT_PING = 2086
-PORT_DELETE = 2053
-PORT_MESSAGE_HISTORY = 2054
-PORT_TYPING = 2055
+PORT_SUB_REQUESTS = 2053
 CONFIG_FILE = path.join(path.dirname(__file__), "config.json")
 
-connect = 0
+Connect = 0
 nickname = ''
 chatID = ''
 alreadysending = False
-serverfound = False
 audio_enabled = False
 voice_enabled = False
 id_visible = None
@@ -39,10 +37,20 @@ noinputoutput = False
 image_attached = False
 attached_image = None
 chat_destroyed = False
+typesock = None
 muted = False
 saved_nickname = ""
-typing_socket = None
 active_typers = {}
+previous_visibleroomslist = []
+visiblerooms = []
+availableclies = {}
+
+if platform == "win32":
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(0)
+    except Exception:
+        pass
 
 root = Tk()
 root.withdraw()
@@ -50,17 +58,42 @@ root.title('μChat')
 root.geometry(f'{WIDTH}x{HEIGHT}')
 root.config(background='light gray')
 root.resizable(False, False)
+root.tk.call('tk', 'scaling', 2.0)
 
 try:
     client = socket(AF_INET, SOCK_STREAM)
     client.settimeout(5)
     client.connect((HOST, PORT_CHAT))
-    data = loads(client.recv(1024).decode("utf-8"))
-    availableclies = data["clients"]
-    visiblerooms = data["visible_rooms"]
 except Exception as e:
     showerror(title='μChat', message=f'Cannot connect to server.\nErr : {e}')
     quit()
+
+try:
+    audio_queue = Queue()
+    p = PyAudio()
+    CHUNK = 512
+    FORMAT = paInt32
+    CHANNELS = 2
+    RATE = 48000
+    input_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+    output_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
+    noinputoutput = False
+except:
+    showwarning(title='μChat', message='No Audio input/output device detected! Voice chat is unavailable.')
+    noinputoutput = True
+
+if not noinputoutput:
+    try:
+        voicesocket = socket(AF_INET, SOCK_STREAM)
+        voicesocket.connect((HOST, PORT_VOICE))
+        voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+        client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+        data = {
+            "chat_id": chatID,
+        }
+        voicesocket.sendall(dumps(data).encode("utf-8"))
+    except Exception as e:
+        showerror(title='μChat', message='Voice chat failed to connect.\nThe chat may still work.')
 
 if path.exists(CONFIG_FILE):
     try:
@@ -98,6 +131,103 @@ def save_nickname(nickname):
     except Exception as e:
         showerror(title='μChat', message=f'Can\'t save nickname.\n{e}')
 
+def validate(id=None, logindiag=None, idfield=None, nicknamefield=None, id_visible_var=None):
+    global chatID, nickname, id_visible, connectedormaderoom, availableclies, visiblerooms
+    if id is None:
+        r_id = idfield.get().strip()
+    else:
+        r_id = id
+    nick = nicknamefield.get().strip()
+    if not r_id:
+        showerror(title='μChat', message='Room ID cannot be empty.', parent=logindiag)
+        return
+    if not nick:
+        showerror(title='μChat', message='Nickname cannot be empty.', parent=logindiag)
+        return
+    if r_id in visiblerooms or r_id in availableclies:
+        chatID = r_id
+        nickname = nick
+        connectedormaderoom = True
+        id_visible = id_visible_var.get()
+        save_nickname(nick)
+        logindiag.destroy()
+    else:
+        showerror(title='μChat', message='Invalid Room ID.', parent=logindiag)
+
+def update_available_rooms(max_per_column, inner_frame, logindiag, idfield, nicknamefield, id_visible_var):
+    global visiblerooms, previous_visibleroomslist, availableclies
+    result_queue = Queue()
+    stop_event = T_Event()
+    def resquester():
+        while not stop_event.is_set():
+            try:
+                searchsock = socket(AF_INET, SOCK_STREAM)
+                searchsock.settimeout(3)
+                searchsock.connect((HOST, PORT_SUB_REQUESTS))
+                searchsock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+                searchsock.sendall((dumps({"request": "available_rooms"}) + "\n").encode("utf-8"))
+                raw_inp = searchsock.recv(65536).decode("utf-8")
+                searchsock.close()
+                result = loads(raw_inp.strip()).get("data")
+                roomsfound = result[0]
+                availableclies = result[1]
+                if roomsfound is not None:
+                    result_queue.put(("data", roomsfound))
+            except Exception as x:
+                if not stop_event.is_set():
+                    result_queue.put(("error", str(x)))
+                return
+            stop_event.wait(1)
+    def update_list(rooms):
+        global visiblerooms, previous_visibleroomslist
+        if rooms == visiblerooms:
+            return
+        previous_visibleroomslist = rooms
+        visiblerooms = rooms
+        try:
+            if not logindiag.winfo_exists():
+                return
+            for widget in inner_frame.winfo_children():
+                widget.destroy()
+            for index, room in enumerate(rooms):
+                current_col = index // max_per_column
+                current_row = index % max_per_column
+                roomslistbox = Frame(inner_frame, bg='white')
+                roomlabel = Label(roomslistbox, text=room, font=("Arial", 10), bg="white", fg='black', wraplength=100)
+                joinbtn = Button(roomslistbox, command=lambda r=room: (stop_event.set(), validate(r, logindiag, idfield, nicknamefield, id_visible_var)), text="Join", font=("Arial", 8), fg='white', bg='green', width=6)
+                roomlabel.pack(side=LEFT, padx=(0, 2))
+                joinbtn.pack(side=LEFT)
+                roomslistbox.grid(row=current_row, column=current_col, sticky=W, padx=8, pady=2)
+            if rooms == []:
+                Label(inner_frame, text="No rooms are currently listed publicly.\nClick cancel and press create room\nto make a new one!", anchor=W, justify=LEFT, font=("Arial", 10), fg='black', bg="white", wraplength=400).pack(anchor=W, padx=10)
+            logindiag.update_idletasks()
+        except TclError:
+            stop_event.set()
+    def check_queue():
+        if not logindiag.winfo_exists():
+            stop_event.set()
+            return
+        try:
+            while True:
+                kind, payload = result_queue.get_nowait()
+                if kind == "data":
+                    update_list(payload)
+                elif kind == "error":
+                    if logindiag.winfo_exists():
+                        showerror(title='μChat', message=f"Can't update available rooms.\n{payload}")
+                    stop_event.set()
+                    return
+        except Empty:
+            pass
+        except TclError:
+            stop_event.set()
+            return
+        if logindiag.winfo_exists() and not stop_event.is_set():
+            logindiag.after(200, check_queue)
+    Thread(target=resquester, daemon=True).start()
+    logindiag.after(200, check_queue)
+    return stop_event
+
 def show_login_dialog():
     global chatID, nickname, id_visible, connectedormaderoom, saved_nickname
     a = askyesnocancel(title='μChat', message='Do you want to join a chat? Click No to create a new room.')
@@ -127,15 +257,6 @@ def show_login_dialog():
         v_scrollbar.pack(side=RIGHT, fill=Y)
         roomlistcanvas.pack(side=LEFT, fill=BOTH, expand=True)
         max_per_column = 10
-        for index, room in enumerate(visiblerooms):
-            current_col = index // max_per_column
-            current_row = index % max_per_column
-            roomslistbox = Frame(inner_frame, bg='white')
-            roomlabel = Label(roomslistbox, text=room, font=("Arial", 10),bg="white", fg='black', wraplength=100)
-            joinbtn = Button(roomslistbox,command=lambda r=room: validate(r), text="Join", font=("Arial", 8), fg='white', bg='green', width=6)
-            roomlabel.pack(side=LEFT, padx=(0, 2))
-            joinbtn.pack(side=LEFT)
-            roomslistbox.grid(row=current_row, column=current_col, sticky=W, padx=8, pady=2)
         Label(logindiag, text="Room ID:", font=("Arial", 10), fg='black').pack(anchor=W, padx=10)
         idfield = Entry(logindiag, width=50)
         idfield.pack(anchor=W, padx=10)
@@ -146,32 +267,11 @@ def show_login_dialog():
         if saved_nickname:
             nicknamefield.insert(0, saved_nickname)
         id_visible_var = BooleanVar(value=True)
-        def validate(id=None):
-            global chatID, nickname, id_visible, connectedormaderoom
-            if id is None:
-                r_id = idfield.get().strip()
-            else:
-                r_id = id
-            nick = nicknamefield.get().strip()
-            if not r_id:
-                showerror(title='μChat', message='Room ID cannot be empty.', parent=logindiag)
-                return
-            if not nick:
-                showerror(title='μChat', message='Nickname cannot be empty.', parent=logindiag)
-                return
-            if r_id in availableclies:
-                chatID = r_id
-                nickname = nick
-                connectedormaderoom = True
-                id_visible = id_visible_var.get()
-                save_nickname(nick)
-                logindiag.destroy()
-            else:
-                showerror(title='μChat', message='Invalid Room ID.', parent=logindiag)
         btn_frame = Frame(logindiag)
         btn_frame.pack(fill='x', pady=10)
-        Button(btn_frame, text="Join", command=validate, bg="green", fg="white", width=10).pack(side="left", padx=15)
+        Button(btn_frame, text="Join", command=lambda: validate(None, logindiag, idfield, nicknamefield, id_visible_var), bg="green", fg="white", width=10).pack(side="left", padx=15)
         Button(btn_frame, text="Cancel", command=lambda: (logindiag.destroy(), quit()), bg="red", fg="white", width=10).pack(side="right", padx=15)
+        update_available_rooms(max_per_column, inner_frame, logindiag, idfield, nicknamefield, id_visible_var)
         logindiag.update_idletasks()
         needed_height = max(250, logindiag.winfo_reqheight())
         logindiag.geometry(f'460x{needed_height}')
@@ -441,20 +541,32 @@ def send(event=None):
         alreadysending = False
 
 def destruct_chat():
+    def do_destruct():
+        try:
+            sock = socket(AF_INET, SOCK_STREAM)
+            sock.connect((HOST, PORT_SUB_REQUESTS))
+            payload = {
+                "request": "destruction",
+                "data": dumps({"password": pwd, "room_ID": chatID})
+            }
+            sock.sendall((dumps(payload) + "\n").encode("utf-8"))
+            buffer = ""
+            while "\n" not in buffer:
+                chunk = sock.recv(4096).decode("utf-8")
+                if not chunk:
+                    break
+                buffer += chunk
+            sock.close()
+            if buffer.strip():
+                result = loads(buffer.strip().split("\n", 1)[0])
+                if not result.get("success"):
+                    root.after(0, lambda: showerror(title='μChat', message='Destruction failed. Check the password.'))
+        except Exception as e:
+            root.after(0, lambda: showerror(title='μChat', message=f"Failed to destruct chat.:\n{e}"))
     pwd = password(title='μChat', text='Enter destruction password:')
     if not pwd:
         return
-    try:
-        temp_sock = socket(AF_INET, SOCK_STREAM)
-        temp_sock.connect((HOST, PORT_DELETE))
-        payload = {
-            "password": pwd,
-            "room_ID": chatID
-        }
-        temp_sock.sendall(dumps(payload).encode("utf-8"))
-        temp_sock.close()
-    except Exception as e:
-        showerror(title='μChat', message=f"Failed to issue destruction request:\n{e}")
+    Thread(target=do_destruct, daemon=True).start()
 
 def handle_room_destruction():
     global chat_destroyed, voice_enabled, audio_enabled
@@ -462,7 +574,7 @@ def handle_room_destruction():
         return
     chat_destroyed = True
     clear_chat_frame()
-    headertxt.config(text="Room was destructed!", fg='red')
+    headertxt.config(text="Room ID : ------- | Ping : -- ms",fg='red')
     voice_enabled = False
     audio_enabled = False
     ymstbx.config(state=DISABLED)
@@ -472,6 +584,10 @@ def handle_room_destruction():
     imagebtn.config(state=DISABLED, bg='grey')
     destbtn.config(state=DISABLED, bg='grey')
     loadhistbtn.config(state=DISABLED, bg='grey')
+    typing_status_label.config(text="", fg='gray')
+    mutebtn.config(state=DISABLED, bg='grey')
+    pingprogressbar.config(value=0)
+    
     try:
         client.close()
     except Exception:
@@ -480,32 +596,24 @@ def handle_room_destruction():
         voicesocket.close()
     except Exception:
         pass
-    showerror(title='μChat', message='This chat has been destructed.')
+    showerror(title='μChat', message='This room has been destructed.\nall messages have been deleted.')
     root.destroy()
 
-def connect_typing_socket():
-    global typing_socket
-    try:
-        sock = socket(AF_INET, SOCK_STREAM)
-        sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-        sock.connect((HOST, PORT_TYPING))
-        typing_socket = sock
-        Thread(target=typing_receiver, daemon=True).start()
-    except Exception as e:
-        showwarning(title='μChat', message=f'Can\'t connect to typing service.\n{e}')
-
 def typing_sender(event=None,is_typing=True):
-    global chatID, nickname, client_id, typing_socket
+    global chatID, nickname, client_id, typesock
     try:
-        if not typing_socket:
+        if not typesock:
             return
         payload = {
-            "room_id": chatID,
-            "name": nickname,
-            "typing": is_typing,
-            "client_id": client_id
+            "request": "typing",
+            "data": dumps({
+                "room_ID": chatID,
+                "name": nickname,
+                "typing": is_typing,
+                "client_id": client_id
+            })
         }
-        typing_socket.sendall((dumps(payload) + "\n").encode("utf-8"))
+        typesock.sendall((dumps(payload) + "\n").encode("utf-8"))
     except Exception as e:
         pass
 
@@ -525,8 +633,11 @@ def remove_typer(name):
         root.after(0, update_typing_label)
 
 def typing_receiver():
-    global typing_socket, active_typers
-    sock = typing_socket
+    global typesock
+    typesock = socket(AF_INET, SOCK_STREAM)
+    typesock.connect((HOST, PORT_SUB_REQUESTS))
+    typesock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+    sock = typesock
     if not sock:
         return
     buffer = ""
@@ -542,7 +653,9 @@ def typing_receiver():
                 if not line:
                     continue
                 data = loads(line)
-                room_id = data.get("room_id")
+                if data.get("request") != "typing":
+                    continue
+                room_id = data.get("room_ID")
                 name = data.get("name")
                 is_typing = data.get("typing")
                 sender_client_id = data.get("client_id")
@@ -550,7 +663,7 @@ def typing_receiver():
                     if is_typing:
                         active_typers[name] = True
                         root.after(0, update_typing_label)
-                        root.after(1500, lambda n=name: remove_typer(n))
+                        root.after(1000, lambda n=name: remove_typer(n))
                     else:
                         root.after(0, lambda n=name: remove_typer(n))
         except Exception as e:
@@ -596,6 +709,7 @@ def receive():
                         root.after(0, lambda: notification_listener(message=message, name=name, message_type=message_type, description=description))
                 if autoscroll.get() == 1:
                     tbxmaincanvas.yview_moveto(1.0)
+                
                 root.config(bg='green')
                 autoscchbx.config(bg='green')
                 sticktocorner.config(bg='green')
@@ -631,9 +745,9 @@ def load_history():
         progressbar.config(value=10)
         sock = socket(AF_INET, SOCK_STREAM)
         progressbar.config(value=20)
-        sock.connect((HOST, PORT_MESSAGE_HISTORY))
+        sock.connect((HOST, PORT_SUB_REQUESTS))
         progressbar.config(value=30)
-        sock.sendall((dumps({"room_ID": chatID}) + "\n").encode("utf-8"))
+        sock.sendall((dumps({"request": "history", "data": dumps({"room_ID": chatID})}) + "\n").encode("utf-8"))
         progressbar.config(value=50)
         buffer = ""
         while True:
@@ -675,7 +789,8 @@ def header():
         s = socket(AF_INET, SOCK_STREAM)
         try:
             st = time()
-            s.connect((HOST, PORT_PING))
+            s.connect((HOST, PORT_SUB_REQUESTS))
+            s.sendall((dumps({"request": "ping", "data": "none"}) + "\n").encode("utf-8"))
             et = time()
             ping = round((et - st) * 1000, 2)
             headertxt.config(fg='green')
@@ -687,26 +802,27 @@ def header():
         sleep(1)
     
 def windowmanager():
-    if stick.get() == 1:
-        root.overrideredirect(True)
-        place_top_left()
-        root.attributes('-topmost', True)
-        root.update_idletasks()
-    else:
-        root.overrideredirect(False)
-        root.attributes('-topmost', False)
-        root.update_idletasks()
-    root.after(1, windowmanager)
+    try:
+        while True:
+            if chat_destroyed:
+                break
+            if stick.get() == 1:
+                root.after(0, lambda: (root.overrideredirect(True), place_top_left(), root.attributes('-topmost', True)))
+            else:
+                root.after(0, lambda: (root.overrideredirect(False), root.attributes('-topmost', False)))
+            sleep(0.2)
+    except:
+        pass
 
 def mute_chat() :
     global muted
     muted = not muted
     if muted == True:
-        muutebtn.config(background='green')
-        muutebtn.config(fg='black')
+        mutebtn.config(background='green')
+        mutebtn.config(fg='black')
     else:
-        muutebtn.config(background='orange')
-        muutebtn.config(fg='black')
+        mutebtn.config(background='orange')
+        mutebtn.config(fg='black')
 
 def place_top_left():
     root.geometry(f"{WIDTH}x{HEIGHT}+0+0")
@@ -736,33 +852,6 @@ def enable_mic():
     else:
         micbtn.config(background='orange')
         micbtn.config(fg='black')
-
-try:
-    audio_queue = Queue()
-    p = PyAudio()
-    CHUNK = 512
-    FORMAT = paInt32
-    CHANNELS = 2
-    RATE = 48000
-    input_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
-    output_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
-    noinputoutput = False
-except:
-    showwarning(title='μChat', message='No Audio input/output device detected! Voice chat is unavailable.')
-    noinputoutput = True
-   
-if not noinputoutput:
-    try:
-        voicesocket = socket(AF_INET, SOCK_STREAM)
-        voicesocket.connect((HOST, PORT_VOICE))
-        voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-        client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-        data = {
-            "chat_id": chatID,
-        }
-        voicesocket.sendall(dumps(data).encode("utf-8"))
-    except Exception as e:
-        showerror(title='μChat', message='Voice chat failed to connect.\nThe chat may still work.')
 
 def voice_receiver():
     if not noinputoutput:
@@ -867,6 +956,9 @@ def notification_listener(message, name,val=100,message_type="text_message",desc
     progress_bar.pack(pady=5, padx=5, anchor=W)
     slide_in(start_x)
 
+def sync_frame_width(event):
+    tbxmaincanvas.itemconfig(tbxmain_window, width=event.width)
+
 root.bind("<Return>", send)
 root.resizable(False, False)
 background = Toplevel(root)
@@ -881,8 +973,6 @@ text_variable_stick = IntVar(value=0)
 stick = IntVar(value=0)
 headertxt = Label(text=f'Room ID : {chatID}', background="light gray", width=68, anchor=W, font=('Arial', 8))
 tbxmaincanvas = Canvas(master=root, bg='white', width=618, height=350)
-def sync_frame_width(event):
-    tbxmaincanvas.itemconfig(tbxmain_window, width=event.width)
 tbxmaincanvas.bind("<Configure>", sync_frame_width)
 tbxmaincanvas.place(x=12, y=75)
 tbxscrollbar = Scrollbar(master=root, orient=VERTICAL, command=tbxmaincanvas.yview)
@@ -901,7 +991,7 @@ micbtn = Button(text='TALK', width=5, height=1, background='orange', fg='black',
 imagebtn = Button(text='IMAGE', width=6, height=1, background='orange', fg='black', font=('Arial', 8), command=attach_image)
 destbtn = Button(text='DESTRUCT', width=13, height=1, background='orange', fg='black', font=('Arial', 8), command=destruct_chat)
 loadhistbtn = Button(text='LOAD HISTORY', width=15, height=1, background='orange', fg='black', font=('Arial', 8), command=load_history)
-muutebtn = Button(text='MUTE', width=5, height=1, background='orange', fg='black', font=('Arial', 8), command=mute_chat)
+mutebtn = Button(text='MUTE', width=5, height=1, background='orange', fg='black', font=('Arial', 8), command=mute_chat)
 pingprogressbar = ttk.Progressbar(root, length=200,value=0)
 ymstbx.bind("<KeyPress>", typing_sender)
 typing_status_label = Label(text='', background="light gray", width=72, anchor=W, font=('Arial', 8, 'italic'), fg='gray')
@@ -914,7 +1004,7 @@ loadhistbtn.place(x=315, y=505)
 imagebtn.place(x=468, y=505)
 audiobtn.place(x=603, y=505)
 micbtn.place(x=540, y=505)
-muutebtn.place(x=253, y=505)
+mutebtn.place(x=253, y=505)
 destbtn.place(x=540, y=7)
 pingprogressbar.place(x=320, y=11)
 
@@ -924,12 +1014,11 @@ if noinputoutput:
     voice_enabled = False
     audio_enabled = False
 
-windowmanager()
-
 Thread(target=receive, daemon=True).start()
 Thread(target=header, daemon=True).start()
 Thread(target=voice_sender, daemon=True).start()
 Thread(target=voice_receiver, daemon=True).start()
-Thread(target=connect_typing_socket, daemon=True).start()
+Thread(target=typing_receiver, daemon=True).start()
+Thread(target=windowmanager, daemon=True).start()
 
 root.mainloop()
