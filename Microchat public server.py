@@ -2,14 +2,25 @@ from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPP
 from threading import Thread, Lock
 from json import dumps, loads
 from os import path, makedirs, listdir
+from collections import defaultdict
+from time import time as time_now
+
+# basic configs for main app functions and server ports
 
 VOICE_PORT = 2082
 CHAT_PORT = 2052
 SUB_REQUESTS_PORT = 2053
 DESTRUCTOR_PASSWORD = 'nopassword'
 HOST_ON = "0.0.0.0"
-
 ROOMS_DIR = path.join(path.dirname(__file__), "rooms")
+
+# room creator rate limiter config
+
+ROOMS_TO_ALLOW_AT_FIRST = 5
+BASE_DELAY = 30
+DELAY_MULTIPLIER = 2
+MAXIMUM_ROOMS = 100
+
 if not path.exists(ROOMS_DIR):
     makedirs(ROOMS_DIR)
 
@@ -26,13 +37,15 @@ except Exception as x:
 
 clientlist = {}
 typingclientlist = {}
+rooms = []
 addrlist = []
 client = False
 voice_clients = {}
 visiblerooms = []
 message_histories = {}
 voice_clients_lock = Lock()
-
+roomlogs = defaultdict(list)
+roomlock = Lock()
 
 def is_room_destructed(room_id):
     filepath = path.join(ROOMS_DIR, f"room_{room_id}.json")
@@ -45,7 +58,6 @@ def is_room_destructed(room_id):
         except Exception:
             pass
     return False
-
 
 def load_history_from_disk():
     for filename in listdir(ROOMS_DIR):
@@ -60,11 +72,14 @@ def load_history_from_disk():
                         message_histories[room_id] = content.get("history", [])
                         if content.get("is_visible", True) and room_id not in visiblerooms:
                             visiblerooms.append(room_id)
+                        if room_id not in rooms:
+                            rooms.append(room_id)
                     elif isinstance(content, list):
                         message_histories[room_id] = content
+                        if room_id not in rooms:
+                            rooms.append(room_id)
             except Exception:
                 pass
-
 
 def save_room_history(room_id):
     if is_room_destructed(room_id):
@@ -102,6 +117,25 @@ load_history_from_disk()
 def send_line(sock, text: str):
     sock.sendall((text + "\n").encode("utf-8"))
 
+def check_room_creation_allowed(ip):
+    with roomlock:
+        now = time_now()
+        if len(rooms) >= MAXIMUM_ROOMS:
+            return False, 0
+        timestamps = roomlogs[ip]
+        count = len(timestamps)
+        if count < ROOMS_TO_ALLOW_AT_FIRST:
+            return True, 0
+        last = timestamps[-1]
+        required_delay = BASE_DELAY * (DELAY_MULTIPLIER ** (count - ROOMS_TO_ALLOW_AT_FIRST))
+        elapsed = now - last
+        if elapsed >= required_delay:
+            return True, 0
+        return False, required_delay - elapsed
+
+def record_room_creation(ip):
+    with roomlock:
+        roomlogs[ip].append(time_now())
 
 def accept_client_connection():
     try:
@@ -146,16 +180,21 @@ def broadcast_message_to_client(client_socket):
                     client_socket.sendall(destruction_msg)
                     client_socket.close()
                     return
+                if chatID not in rooms:
+                    out_data = {
+                        "message_type": "room_does_not_exist",
+                        "room_ID": chatID,
+                    }
+                    client_socket.sendall((dumps(out_data) + "\n").encode("utf-8"))
+                    client_socket.close()
+                    return
                 msg = data["data"]
-                idvisible = data["id_is_visible"]
                 message_type = data["message_type"]
                 name = data["name"]
                 description = data["description"]
                 time = data["time"]
                 date = data["date"]
                 client_id = data["client_id"]
-                if str(idvisible) == 'True' and chatID not in visiblerooms:
-                    visiblerooms.append(chatID)
                 clientlist[client_socket] = chatID
                 if chatID not in message_histories:
                     message_histories[chatID] = []
@@ -245,6 +284,8 @@ def self_destruction_transmitter(client_socket, data):
         if password == DESTRUCTOR_PASSWORD:
             if room_ID in visiblerooms:
                 visiblerooms.remove(room_ID)
+            if room_ID in rooms:
+                rooms.remove(room_ID)
             mark_room_destructed(room_ID)
             message_histories.pop(room_ID, None)
             destruction_msg = (dumps({
@@ -398,6 +439,46 @@ def send_available_rooms(client_socket):
         except Exception:
             pass
 
+def create_room(client_socket, data):
+    try:
+        ip = client_socket.getpeername()[0]
+        room_to_make = data.get("room_id")
+        VisibleOrNo = data.get("visible")
+        allowed, wait_time = check_room_creation_allowed(ip)
+        if not allowed:
+            client_socket.sendall((dumps({
+                "request": "create_room",
+                "data": "rate_limited",
+                "retry_after": round(wait_time, 1)
+            }) + "\n").encode("utf-8"))
+            client_socket.close()
+            return
+        if room_to_make in rooms:
+            client_socket.sendall((dumps({
+                "request": "create_room",
+                "data": "room_id_already_exists"
+            }) + "\n").encode("utf-8"))
+            client_socket.close()
+            return
+        else:
+            if VisibleOrNo == True:
+                visiblerooms.append(room_to_make)
+            rooms.append(room_to_make)
+            message_histories[room_to_make] = []
+            save_room_history(room_to_make)
+            record_room_creation(ip)
+            client_socket.sendall((dumps({
+                "request": "create_room",
+                "data": "room_created"
+            }) + "\n").encode("utf-8"))
+            client_socket.close()
+    except Exception as x:
+        print(f"Create room error: {x}")
+        try:
+            client_socket.close()
+        except Exception:
+            pass
+        
 def handle_sub_request(client_socket):
     try:
         payload = client_socket.recv(1024).decode("utf-8")
@@ -417,6 +498,8 @@ def handle_sub_request(client_socket):
             client_socket.close()
         elif request == "available_rooms":
             send_available_rooms(client_socket)
+        elif request == "create_room":
+            create_room(client_socket,data)
         else:
             client_socket.close()
     except Exception as x:

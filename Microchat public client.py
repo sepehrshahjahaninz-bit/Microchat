@@ -19,7 +19,7 @@ from sys import platform
 from queue import Queue, Empty
 
 WIDTH, HEIGHT = 680, 550
-HOST = "application-hosts.shahjahani.com"
+HOST = "127.0.0.1"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
@@ -293,9 +293,52 @@ def show_login_dialog():
             if not nick:
                 showerror(title='μChat', message='Nickname cannot be empty.', parent=logindiag)
                 return
-            chatID = create_an_ID(availableclies)
+            visible = id_visible_var.get()
+            max_attempts = 10
+            result = None
+            for attempt in range(max_attempts):
+                new_id = create_an_ID(availableclies)
+                try:
+                    sock = socket(AF_INET, SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect((HOST, PORT_SUB_REQUESTS))
+                    sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+                    payload = {
+                        "request": "create_room",
+                        "data": {"room_id": new_id, "visible": visible}
+                    }
+                    sock.sendall((dumps(payload) + "\n").encode("utf-8"))
+                    buffer = ""
+                    while "\n" not in buffer:
+                        chunk = sock.recv(4096).decode("utf-8")
+                        if not chunk:
+                            break
+                        buffer += chunk
+                    sock.close()
+                    result = loads(buffer.strip())
+                except Exception as e:
+                    showerror(title='μChat', message=f"Couldn't create room.\n{e}", parent=logindiag)
+                    return
+                if result.get("data") == "room_created":
+                    chatID = new_id
+                    nickname = nick
+                    id_visible = visible
+                    connectedormaderoom = False
+                    save_nickname(nick)
+                    logindiag.destroy()
+                    return
+                elif result.get("data") == "room_id_already_exists":
+                    continue
+                elif result.get("data") == "rate_limited":
+                    showerror(title='μChat', message=f"You have attempted to create too many rooms.\nTry again in {result.get('retry_after')} seconds.", parent=logindiag)
+                else:
+                    showerror(title='μChat', message=f"Couldn't create room.\n{result.get('data')}", parent=logindiag)
+                    quit()
+                    return
+            showerror(title='μChat', message="Couldn't create a unique room ID. Please try again.", parent=logindiag)
+            chatID = new_id
             nickname = nick
-            id_visible = id_visible_var.get()
+            id_visible = visible
             connectedormaderoom = False
             save_nickname(nick)
             logindiag.destroy()
