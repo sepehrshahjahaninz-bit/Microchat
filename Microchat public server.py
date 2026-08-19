@@ -21,7 +21,7 @@ BASE_DELAY = 30
 DELAY_MULTIPLIER = 2
 MAXIMUM_ROOMS = 100
 
-# messaze size settings
+# message size settings
 
 MAX_BUFFER_SIZE = 1024 * 1024
 

@@ -472,13 +472,11 @@ def errorsign():
     autoscchbx.config(bg='red')
     sticktocorner.config(bg='red')
     headertxt.config(bg='red')
-    headertxt.config(fg='black')
     sleep(0.1)
     root.config(bg='light grey')
     autoscchbx.config(bg='light grey')
     sticktocorner.config(bg='light grey')
     headertxt.config(bg='light grey')
-    headertxt.config(fg='green')
     ymstbx.delete(1.0, END)
     ymstbx.focus()
 
@@ -838,7 +836,8 @@ def handle_room_destruction():
         return
     chat_destroyed = True
     clear_chat_frame()
-    headertxt.config(text="Room ID : ------- | Ping : -- ms",fg='red')
+    headertxt.config(text="Room ID : ------- | Ping : -- ms")
+    headerdot.config(fg='red')
     voice_enabled = False
     audio_enabled = False
     ymstbx.config(state=DISABLED)
@@ -1029,14 +1028,14 @@ def receive():
                 autoscchbx.config(bg='green')
                 sticktocorner.config(bg='green')
                 headertxt.config(bg='green')
-                headertxt.config(fg='black')
+                headerdot.config(bg='green')
                 typing_status_label.config(bg='green')
                 sleep(0.1)
                 root.config(bg='light grey')
                 autoscchbx.config(bg='light grey')
                 sticktocorner.config(bg='light grey')
                 headertxt.config(bg='light grey')
-                headertxt.config(fg='green')
+                headerdot.config(bg='light grey')
                 typing_status_label.config(bg='light grey')
                 ymstbx.focus()
                 alreadysending = False
@@ -1107,13 +1106,13 @@ def header():
             s.connect((HOST, PORT_SUB_REQUESTS))
             s.sendall((dumps({"request": "ping", "data": "none"}) + "\n").encode("utf-8"))
             et = time()
-            ping = round((et - st) * 1000, 2)
-            headertxt.config(fg='green')
+            ping = f"{str(round((et - st) * 1000, 2))} ms"
+            headerdot.config(fg='green')
         except Exception as x:
-            ping = '-1'
-            headertxt.config(fg='green')
-        headertxt.config(text=f'Room ID : {chatID} | Ping : {ping} ms')
-        pingprogressbar.config(value=ping)
+            ping = 'Timeout'
+            headerdot.config(fg=f'red')
+        headertxt.config(text=f'Room ID : {chatID} | Ping : {ping}')
+        pingprogressbar.config(value=ping.replace(' ms', ''))
         sleep(1)
     
 def windowmanager():
@@ -1287,6 +1286,7 @@ autoscroll = IntVar(value=1)
 text_variable_stick = IntVar(value=0)
 stick = IntVar(value=0)
 headertxt = Label(text=f'Room ID : {chatID}', background="light gray", width=68, anchor=W, font=('Arial', 8))
+headerdot = Label(text=f'•', background="light gray", anchor=W, font=('Arial', 18))
 tbxmaincanvas = Canvas(master=root, bg='white', width=618, height=350)
 tbxmaincanvas.bind("<Configure>", sync_frame_width)
 tbxmaincanvas.place(x=12, y=75)
@@ -1307,7 +1307,7 @@ imagebtn = Button(text='IMAGE', width=6, height=1, background='orange', fg='blac
 destbtn = Button(text='DESTRUCT', width=13, height=1, background='orange', fg='black', font=('Arial', 8), command=destruct_chat)
 loadhistbtn = Button(text='LOAD HISTORY', width=15, height=1, background='orange', fg='black', font=('Arial', 8), command=load_history)
 mutebtn = Button(text='MUTE', width=5, height=1, background='orange', fg='black', font=('Arial', 8), command=mute_chat)
-pingprogressbar = ttk.Progressbar(root, length=200,value=0)
+pingprogressbar = ttk.Progressbar(root, length=190,value=0)
 ymstbx.bind("<KeyPress>", typing_sender)
 ymstbx.bind("<<Paste>>", paste_image_from_clipboard)
 typing_status_label = Label(text='', background="light gray", width=72, anchor=W, font=('Arial', 8, 'italic'), fg='gray')
@@ -1315,14 +1315,15 @@ typing_status_label.place(x=12, y=42)
 sbtn.place(x=612, y=435)
 autoscchbx.place(x=12, y=485)
 sticktocorner.place(x=12, y=512)
-headertxt.place(x=12, y=11)
+headertxt.place(x=38, y=11)
+headerdot.place(x=14, y=-1)
 loadhistbtn.place(x=315, y=505)
 imagebtn.place(x=468, y=505)
 audiobtn.place(x=603, y=505)
 micbtn.place(x=540, y=505)
 mutebtn.place(x=253, y=505)
 destbtn.place(x=540, y=7)
-pingprogressbar.place(x=320, y=11)
+pingprogressbar.place(x=330, y=11)
 
 if noinputoutput:
     audiobtn.config(state=DISABLED, bg='grey')
