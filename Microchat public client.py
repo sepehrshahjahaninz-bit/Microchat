@@ -11,12 +11,13 @@ from queue import Queue
 from pyaudio import PyAudio, paInt32
 from json import loads, dumps
 from base64 import b64encode, b64decode
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageGrab
 from io import BytesIO
 from uuid import uuid4
 from os import path
 from sys import platform
 from queue import Queue, Empty
+from subprocess import Popen, PIPE, run as un
 
 WIDTH, HEIGHT = 680, 550
 HOST = "127.0.0.1"
@@ -149,7 +150,7 @@ def mark_message_sent(msg_id):
         if info["bar"]:
             info["bar"].stop()
             info["bar"].destroy()
-        info["label"].config(text="Sent", fg='gray', font=('Arial', 6, 'italic'))
+        info["label"].config(text="Delivered", fg='gray', font=('Arial', 6, 'italic'))
     except TclError:
         pass
 
@@ -558,7 +559,7 @@ def create_new_message_bubble(message, message_type, name, description="", time=
         message_label.pack(pady=5, padx=5, anchor=W)
         btn_frame = Frame(bubble_frame, bg=bg_color)
         copybtn = Button(btn_frame, text="COPY", command=lambda: copy_to_clipboard(text), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
-        delbtn = Button(btn_frame, text="DELETE", command=lambda: (pending_messages.pop(msg_id, None),pending_message_data.pop(msg_id, None),message_retry_count.pop(msg_id, None),del_message(bubble_frame)), bg="red", fg="white", width=6, height=1, font=('Arial', 6, 'bold'))
+        delbtn = Button(btn_frame, text="DELETE", command=lambda: (pending_messages.pop(msg_id, None),pending_message_data.pop(msg_id, None),message_retry_count.pop(msg_id, None),del_message(bubble_frame)), bg="red", fg="white", width=8, height=1, font=('Arial', 6, 'bold'))
         copybtn.pack(side=LEFT, padx=(0, 5))
         delbtn.pack(side=LEFT, padx=(0, 5))
         btn_frame.pack(pady=5, padx=5, anchor=W)
@@ -605,9 +606,12 @@ def create_new_message_bubble(message, message_type, name, description="", time=
             btn_frame = Frame(bubble_frame, bg=bg_color)
             copybtn = Button(btn_frame, text="COPY", command=lambda: copy_to_clipboard(description), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
             saveimagebtn = Button(btn_frame, text="SAVE", command=lambda: save_image(raw_img), bg="green", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
-            delbtn = Button(btn_frame, text="DELETE", command=lambda: (pending_messages.pop(msg_id, None), del_message(bubble_frame)), bg="red", fg="white", width=6, height=1,font=('Arial', 6, 'bold'))
-            copybtn.pack(side=LEFT, padx=(0, 5))
+            copyimagebtn = Button(btn_frame, text="COPY IMAGE", command=lambda: copy_image_to_clipboard(raw_img), bg="green", fg="white", width=14, height=1,font=('Arial', 6, 'bold'))
+            delbtn = Button(btn_frame, text="DELETE", command=lambda: (pending_messages.pop(msg_id, None), del_message(bubble_frame)), bg="red", fg="white", width=8, height=1,font=('Arial', 6, 'bold'))
+            if description != 'none':
+                copybtn.pack(side=LEFT, padx=(0, 5))
             saveimagebtn.pack(side=LEFT, padx=(0, 5))
+            copyimagebtn.pack(side=LEFT, padx=(0, 5))
             delbtn.pack(side=LEFT, padx=(0, 5))
             btn_frame.pack(pady=5, padx=5, anchor=W)
             date_label = Label(bubble_frame, text=f"{date}", fg='gray', bg=bg_color, anchor=W, justify=LEFT, font=('Arial', 5, 'bold'))
@@ -621,14 +625,71 @@ def create_new_message_bubble(message, message_type, name, description="", time=
                 status_label.pack(side=LEFT)
                 status_bar = None
                 if pending:
-                    status_bar = ttk.Progressbar(status_frame, orient=HORIZONTAL, length=50, mode='indeterminate')
-                    status_bar.pack(side=LEFT, padx=(4, 0))
+                    status_bar = ttk.Progressbar(status_frame, orient=HORIZONTAL, length=100)
+                    status_bar.pack(side=LEFT, padx=(8, 0))
                     status_bar.start(10)
                     pending_messages[msg_id] = {"label": status_label, "bar": status_bar, "frame": status_frame}
             bubble_frame.pack(pady=4, padx=8, anchor=anchor)
             update_scroll()
         except Exception as e:
             print(f"image error: {e}")
+
+def show_image_preview(raw_img):
+    global image_attached, attached_image
+    preview_win = Toplevel()
+    preview_win.title("Image Preview - μChat")
+    preview_win.resizable(False, False)
+    preview_win.grab_set()
+    thumb_img = raw_img.copy()
+    thumb_img.thumbnail((300, 300))
+    tk_img = ImageTk.PhotoImage(thumb_img)
+    Label(preview_win, text="Do you want to attach this image?", font=("Arial")).pack(pady=5)
+    img_label = Label(preview_win, image=tk_img)
+    img_label.image = tk_img
+    img_label.pack(padx=10, pady=5)
+    def confirm():
+        global image_attached, attached_image
+        buf = BytesIO()
+        img_to_save = raw_img.convert("RGB") if raw_img.mode in ("RGBA", "P") else raw_img
+        img_to_save.save(buf, format="PNG")
+        attached_image = b64encode(buf.getvalue()).decode('utf-8')
+        image_attached = True
+        imagebtn.config(background='green', text='IMAGE')
+        preview_win.destroy()
+    def cancel():
+        preview_win.destroy()
+    btn_frame = Label(preview_win)
+    btn_frame.pack(fill='x', pady=10)
+    Button(btn_frame, text="Confirm", command=confirm, bg="green", fg="white", width=10).pack(side="left", padx=15)
+    Button(btn_frame, text="Cancel", command=cancel, bg="red", fg="white", width=10).pack(side="right", padx=15)
+
+def attach_image():
+    file_path = filedialog.askopenfilename(
+        title="Select Image",
+        filetypes=[("Image Files", "*.png *.jpg *.jpeg *.gif *.bmp")]
+    )
+    if not file_path:
+        return
+    try:
+        raw_img = Image.open(file_path)
+        show_image_preview(raw_img)
+    except Exception as e:
+        showerror(title='μChat', message=f'Failed to load image preview:\n{e}')
+
+def paste_image_from_clipboard(event=None):
+    try:
+        clip_img = ImageGrab.grabclipboard()
+        if clip_img is None:
+            return  # nothing image-like on clipboard, let normal text paste happen
+        if isinstance(clip_img, list):
+            # some platforms return a list of file paths instead of an image
+            if not clip_img:
+                return
+            clip_img = Image.open(clip_img[0])
+        show_image_preview(clip_img)
+        return "break"  # prevent the text paste from also happening
+    except Exception as e:
+        showerror(title='μChat', message=f'Failed to paste image:\n{e}')
 
 def attach_image():
     global image_attached, attached_image
@@ -801,6 +862,42 @@ def handle_room_destruction():
         pass
     showerror(title='μChat', message='This room has been destructed.\nall messages have been deleted.')
     root.destroy()
+
+def copy_image_to_clipboard(image):
+    try:
+        if platform == "win32":
+            import win32clipboard
+            output = BytesIO()
+            image.convert("RGB").save(output, "BMP")
+            data = output.getvalue()[14:]
+            output.close()
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+            win32clipboard.CloseClipboard()
+        elif platform == "darwin":
+            output = BytesIO()
+            image.save(output, "PNG")
+            data = output.getvalue()
+            output.close()
+            process = Popen(
+                ["osascript", "-e",'set the clipboard to (read (POSIX file "/dev/stdin") as «class PNGf»)'],
+                stdin=PIPE
+            )
+            process.communicate(data)
+        else:
+            output = BytesIO()
+            image.save(output, "PNG")
+            data = output.getvalue()
+            output.close()
+            un(
+                ["xclip", "-selection", "clipboard", "-t", "image/png"],
+                input=data
+            )
+    except ImportError as e:
+        showerror(title='μChat', message=f"Missing module for image clipboard copy:\n{e}")
+    except Exception as e:
+        showerror(title='μChat', message=f"Failed to copy image:\n{e}")
 
 def typing_sender(event=None,is_typing=True):
     global chatID, nickname, client_id, typesock
@@ -1212,6 +1309,7 @@ loadhistbtn = Button(text='LOAD HISTORY', width=15, height=1, background='orange
 mutebtn = Button(text='MUTE', width=5, height=1, background='orange', fg='black', font=('Arial', 8), command=mute_chat)
 pingprogressbar = ttk.Progressbar(root, length=200,value=0)
 ymstbx.bind("<KeyPress>", typing_sender)
+ymstbx.bind("<<Paste>>", paste_image_from_clipboard)
 typing_status_label = Label(text='', background="light gray", width=72, anchor=W, font=('Arial', 8, 'italic'), fg='gray')
 typing_status_label.place(x=12, y=42)
 sbtn.place(x=612, y=435)
