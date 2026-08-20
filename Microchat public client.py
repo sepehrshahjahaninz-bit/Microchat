@@ -20,7 +20,7 @@ from queue import Queue, Empty
 from subprocess import Popen, PIPE, run as un
 
 WIDTH, HEIGHT = 680, 550
-HOST = "127.0.0.1"
+HOST = "application-hosts.shahjahani.com"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
@@ -664,7 +664,7 @@ def show_image_preview(raw_img):
 def attach_image():
     file_path = filedialog.askopenfilename(
         title="Select Image",
-        filetypes=[("Image Files", "*.png *.jpg *.jpeg *.gif *.bmp")]
+        filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp")]
     )
     if not file_path:
         return
@@ -693,7 +693,7 @@ def attach_image():
     global image_attached, attached_image
     file_path = filedialog.askopenfilename(
         title="Select Image",
-        filetypes=[("Image Files", "*.png *.jpg *.jpeg *.gif *.bmp")]
+        filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp")]
     )
     if not file_path:
         return
@@ -1109,7 +1109,7 @@ def header():
             ping = f"{str(round((et - st) * 1000, 2))} ms"
             headerdot.config(fg='green')
         except Exception as x:
-            ping = 'Timeout'
+            ping = '-1 ms'
             headerdot.config(fg=f'red')
         headertxt.config(text=f'Room ID : {chatID} | Ping : {ping}')
         pingprogressbar.config(value=ping.replace(' ms', ''))
