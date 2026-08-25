@@ -20,7 +20,7 @@ from queue import Queue, Empty
 from subprocess import Popen, PIPE, run as un
 
 WIDTH, HEIGHT = 680, 550
-HOST = "application-hosts.shahjahani.com"
+HOST = "127.0.0.1"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
@@ -110,16 +110,32 @@ if path.exists(CONFIG_FILE):
             config = loads(f.read())
             client_id = config.get("client_id")
             saved_nickname = config.get("nickname")
+            created_rooms = config.get("created_rooms", {})
             if not client_id:
                 raise ValueError("client_id key missing")
     except Exception:
         client_id = str(uuid4())
+        created_rooms = {}
         with open(CONFIG_FILE, "w") as f:
-            f.write(dumps({"client_id": client_id, "nickname": saved_nickname}, indent=4))
+            f.write(dumps({"client_id": client_id, "nickname": saved_nickname, "created_rooms": created_rooms}, indent=4))
 else:
     client_id = str(uuid4())
+    created_rooms = {}
     with open(CONFIG_FILE, "w") as f:
-        f.write(dumps({"client_id": client_id, "nickname": saved_nickname}, indent=4))
+        f.write(dumps({"client_id": client_id, "nickname": saved_nickname, "created_rooms": created_rooms}, indent=4))
+
+def save_room_token(room_id, token):
+    global created_rooms
+    created_rooms[room_id] = token
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            f.write(dumps({
+                "client_id": client_id,
+                "nickname": saved_nickname,
+                "created_rooms": created_rooms
+            }, indent=4))
+    except Exception as e:
+        showerror(title='μChat', message=f"Can't save room token.\n{e}")
 
 def create_an_ID(availableclies):
     data = [0,1,2,3,4,5,6,7,8,9]
@@ -136,7 +152,11 @@ def save_nickname(nickname):
     saved_nickname = nickname
     try:
         with open(CONFIG_FILE, "w") as f:
-            f.write(dumps({"client_id": client_id, "nickname": saved_nickname}, indent=4))
+            f.write(dumps({
+                "client_id": client_id,
+                "nickname": saved_nickname,
+                "created_rooms": created_rooms
+            }, indent=4))
     except Exception as e:
         showerror(title='μChat', message=f'Can\'t save nickname.\n{e}')
 
@@ -222,6 +242,28 @@ def close_upload_bar():
         upload_window.destroy()
     except Exception:
         pass
+
+def join_room_on_server(room_id, cid):
+    try:
+        sock = socket(AF_INET, SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((HOST, PORT_SUB_REQUESTS))
+        sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+        payload = {
+            "request": "join_room",
+            "data": dumps({"room_ID": room_id, "client_id": cid})
+        }
+        sock.sendall((dumps(payload) + "\n").encode("utf-8"))
+        buffer = ""
+        while "\n" not in buffer:
+            chunk = sock.recv(4096).decode("utf-8")
+            if not chunk:
+                break
+            buffer += chunk
+        sock.close()
+        return loads(buffer.strip())
+    except Exception as e:
+        return {"data": "error", "error": str(e)}
 
 def validate(id=None, logindiag=None, idfield=None, nicknamefield=None, id_visible_var=None):
     global chatID, nickname, id_visible, connectedormaderoom, availableclies, visiblerooms
@@ -330,8 +372,12 @@ def show_login_dialog():
     logindiag.geometry('460x250')
     logindiag.resizable(False, False)
     if a is True:
-        toplabel = Label(logindiag, text="Choose a room to join or enter the room ID.", font=("Arial", 10), fg='black', wraplength=400)
+        toplabel = Label(logindiag, text="Choose a room to join or enter direct room ID.", font=("Arial", 10), fg='black', wraplength=430, anchor=CENTER)
         toplabel.pack(anchor=W, padx=10, pady=(5, 0))
+        Label(logindiag, text="Scanning for publicly available rooms...", font=("Italic", 10), fg='gray').pack(anchor=CENTER, padx=10, pady=(5, 0))
+        topprogbar = ttk.Progressbar(logindiag, orient=HORIZONTAL, length=438, mode='indeterminate')
+        topprogbar.pack(anchor=W, padx=10, pady=(5, 5))
+        topprogbar.start(20)
         container = Frame(logindiag, width=440, height=160, bg='white')
         container.pack(anchor=W, padx=10, pady=5)
         container.pack_propagate(False)
@@ -380,7 +426,7 @@ def show_login_dialog():
         id_visible_var = BooleanVar(value=True)
         Checkbutton(logindiag, text="Room visible publicly", variable=id_visible_var).pack(anchor=W, padx=10, pady=5)
         def create_room():
-            global chatID, nickname, id_visible, connectedormaderoom
+            global chatID, nickname, id_visible, connectedormaderoom, room_token
             nick = nicknamefield.get().strip()
             if not nick:
                 showerror(title='μChat', message='Nickname cannot be empty.', parent=logindiag)
@@ -416,6 +462,8 @@ def show_login_dialog():
                     nickname = nick
                     id_visible = visible
                     connectedormaderoom = False
+                    room_token = result.get("token")
+                    save_room_token(new_id, room_token)
                     save_nickname(nick)
                     logindiag.destroy()
                     return
@@ -447,9 +495,22 @@ def getdatestamp():
 while not (chatID and nickname):
     show_login_dialog()
 
+room_token = created_rooms.get(chatID)
+
 root.deiconify()
 
 try:
+    if 'room_token' not in globals():
+        room_token = None
+    join_result = join_room_on_server(chatID, client_id)
+    if join_result.get("data") == "joined_successfully":
+        pass
+    elif join_result.get("data") == "already_joined_a_room":
+        showerror(title='μChat', message="This client has already joined a room previously and cannot join another.")
+        quit()
+    else:
+        showerror(title='μChat', message=f"Couldn't join room.\n{join_result.get('data', join_result.get('error'))}")
+        quit()
     data = {
         "chat_id": chatID,
         "id_is_visible": id_visible,
@@ -678,14 +739,13 @@ def paste_image_from_clipboard(event=None):
     try:
         clip_img = ImageGrab.grabclipboard()
         if clip_img is None:
-            return  # nothing image-like on clipboard, let normal text paste happen
+            return
         if isinstance(clip_img, list):
-            # some platforms return a list of file paths instead of an image
             if not clip_img:
                 return
             clip_img = Image.open(clip_img[0])
         show_image_preview(clip_img)
-        return "break"  # prevent the text paste from also happening
+        return "break"
     except Exception as e:
         showerror(title='μChat', message=f'Failed to paste image:\n{e}')
 
@@ -809,7 +869,7 @@ def destruct_chat():
             sock.connect((HOST, PORT_SUB_REQUESTS))
             payload = {
                 "request": "destruction",
-                "data": dumps({"password": pwd, "room_ID": chatID})
+                "data": dumps({"password": pwd, "room_ID": chatID, "token": room_token})
             }
             sock.sendall((dumps(payload) + "\n").encode("utf-8"))
             buffer = ""
@@ -825,6 +885,9 @@ def destruct_chat():
                     root.after(0, lambda: showerror(title='μChat', message='Destruction failed. Check the password.'))
         except Exception as e:
             root.after(0, lambda: showerror(title='μChat', message=f"Failed to destruct chat.:\n{e}"))
+    if room_token is None:
+        showerror(title='μChat', message="Only the room's creator can destruct it.")
+        return
     pwd = password(title='μChat', text='Enter destruction password:')
     if not pwd:
         return
@@ -1330,6 +1393,9 @@ if noinputoutput:
     micbtn.config(state=DISABLED, bg='grey')
     voice_enabled = False
     audio_enabled = False
+
+if room_token is None:
+    destbtn.config(state=DISABLED, bg='grey')
 
 Thread(target=receive, daemon=True).start()
 Thread(target=header, daemon=True).start()

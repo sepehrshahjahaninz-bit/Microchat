@@ -4,6 +4,7 @@ from json import dumps, loads
 from os import path, makedirs, listdir
 from collections import defaultdict
 from time import time as time_now
+from secrets import token_hex
 
 # basic configs for main app functions and server ports
 
@@ -50,6 +51,10 @@ message_histories = {}
 voice_clients_lock = Lock()
 roomlogs = defaultdict(list)
 roomlock = Lock()
+room_membership = {}
+membership_lock = Lock()
+room_tokens = {}
+socket_client_ids = {}
 
 def is_room_destructed(room_id):
     filepath = path.join(ROOMS_DIR, f"room_{room_id}.json")
@@ -183,8 +188,9 @@ def broadcast_message_to_client(client_socket):
                 if not line:
                     continue
                 data = loads(line)
-                chatID = data["chat_id"]
+                chatID = data.get("chat_id")
                 msg_id = data.get("id")
+                client_id = data.get("client_id")
                 if is_room_destructed(chatID):
                     destruction_msg = (dumps({
                         "message_type": "room_destroyed",
@@ -203,6 +209,19 @@ def broadcast_message_to_client(client_socket):
                     client_socket.sendall((dumps(out_data) + "\n").encode("utf-8"))
                     client_socket.close()
                     return
+                with membership_lock:
+                    authorized_room = room_membership.get(client_id)
+                if authorized_room != chatID:
+                    out_data = {
+                        "message_type": "client_not_connected_to_room",
+                        "room_ID": chatID,
+                        "id": msg_id
+                    }
+                    client_socket.sendall((dumps(out_data) + "\n").encode("utf-8"))
+                    client_socket.close()
+                    return
+                clientlist[client_socket] = chatID
+                socket_client_ids[client_socket] = client_id
                 msg = data.get("data")
                 message_type = data.get("message_type")
                 name = data.get("name")
@@ -246,6 +265,10 @@ def broadcast_message_to_client(client_socket):
     try:
         client_socket.close()
         clientlist.pop(client_socket, None)
+        disconnected_client_id = socket_client_ids.pop(client_socket, None)
+        if disconnected_client_id:
+            with membership_lock:
+                room_membership.pop(disconnected_client_id, None)
     except Exception:
         pass
 
@@ -297,14 +320,16 @@ def self_destruction_transmitter(client_socket, data):
         payloaddict = loads(data)
         password = payloaddict.get('password')
         room_ID = payloaddict.get('room_ID')
+        token = payloaddict.get('token')
         out_data = {"request": "destruction", "room_ID": room_ID, "success": False}
-        if password == DESTRUCTOR_PASSWORD:
+        if password == DESTRUCTOR_PASSWORD and token == room_tokens.get(room_ID):
             if room_ID in visiblerooms:
                 visiblerooms.remove(room_ID)
             if room_ID in rooms:
                 rooms.remove(room_ID)
             mark_room_destructed(room_ID)
             message_histories.pop(room_ID, None)
+            room_tokens.pop(room_ID, None)
             destruction_msg = (dumps({
                 "message_type": "room_destroyed",
                 "room_ID": room_ID,
@@ -496,11 +521,14 @@ def create_room(client_socket, data):
                 visiblerooms.append(room_to_make)
             rooms.append(room_to_make)
             message_histories[room_to_make] = []
+            room_tokens[room_to_make] = str(token_hex(16))
             save_room_history(room_to_make)
             record_room_creation(ip)
+            clientlist[client_socket] = room_to_make
             client_socket.sendall((dumps({
                 "request": "create_room",
-                "data": "room_created"
+                "data": "room_created",
+                "token": room_tokens.get(room_to_make)
             }) + "\n").encode("utf-8"))
             client_socket.close()
     except Exception as x:
@@ -509,7 +537,50 @@ def create_room(client_socket, data):
             client_socket.close()
         except Exception:
             pass
-        
+
+def join_room(client_socket, data):
+    try:
+        data_dic = loads(data)
+        room_ID = data_dic.get("room_ID")
+        client_id = data_dic.get("client_id")
+        if not room_ID or not client_id:
+            client_socket.sendall((dumps({
+                "request": "join_room",
+                "data": "incomplete_request"
+            }) + "\n").encode("utf-8"))
+            client_socket.close()
+            return
+        if is_room_destructed(room_ID) or room_ID not in rooms:
+            client_socket.sendall((dumps({
+                "request": "join_room",
+                "room_ID": room_ID,
+                "data": "room_does_not_exist"
+            }) + "\n").encode("utf-8"))
+            client_socket.close()
+            return
+        with membership_lock:
+            if client_id in room_membership:
+                client_socket.sendall((dumps({
+                    "request": "join_room",
+                    "room_ID": room_ID,
+                    "data": "already_joined_a_room"
+                }) + "\n").encode("utf-8"))
+                client_socket.close()
+                return
+            room_membership[client_id] = room_ID
+        client_socket.sendall((dumps({
+            "request": "join_room",
+            "room_ID": room_ID,
+            "data": "joined_successfully",
+        }) + "\n").encode("utf-8"))
+        client_socket.close()
+    except Exception as x:
+        print(f"Join room error: {x}")
+        try:
+            client_socket.close()
+        except:
+            pass
+
 def handle_sub_request(client_socket):
     try:
         payload = client_socket.recv(1024).decode("utf-8")
@@ -531,6 +602,8 @@ def handle_sub_request(client_socket):
             send_available_rooms(client_socket)
         elif request == "create_room":
             create_room(client_socket,data)
+        elif request == "join_room":
+            join_room(client_socket,data)
         else:
             client_socket.close()
     except Exception as x:
