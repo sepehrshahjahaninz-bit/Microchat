@@ -5,6 +5,7 @@ from os import path, makedirs, listdir
 from collections import defaultdict
 from time import time as time_now
 from secrets import token_hex
+import ssl
 
 # basic configs for main app functions and server ports
 
@@ -14,6 +15,8 @@ SUB_REQUESTS_PORT = 2053
 DESTRUCTOR_PASSWORD = 'nopassword'
 HOST_ON = "0.0.0.0"
 ROOMS_DIR = path.join(path.dirname(__file__), "rooms")
+CERT_FILE = path.join(path.dirname(__file__), "cert.pem")
+KEY_FILE = path.join(path.dirname(__file__), "key.pem")
 
 # room creator rate limiter config
 
@@ -56,6 +59,13 @@ membership_lock = Lock()
 room_tokens = {}
 socket_client_ids = {}
 
+try :
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+except Exception as e:
+    print('Failed to load SSL context.\nError:', e)
+    quit()
+
 def is_room_destructed(room_id):
     filepath = path.join(ROOMS_DIR, f"room_{room_id}.json")
     if path.exists(filepath):
@@ -83,6 +93,9 @@ def load_history_from_disk():
                             visiblerooms.append(room_id)
                         if room_id not in rooms:
                             rooms.append(room_id)
+                        token = content.get("destruction_token")
+                        if token:
+                            room_tokens[room_id] = token
                     elif isinstance(content, list):
                         message_histories[room_id] = content
                         if room_id not in rooms:
@@ -90,13 +103,14 @@ def load_history_from_disk():
             except Exception:
                 pass
 
-def save_room_history(room_id):
+def save_room_history(room_id,destruction_token):
     if is_room_destructed(room_id):
         return
     try:
         data = {
             "is_visible": room_id in visiblerooms,
             "destructed": False,
+            "destruction_token": destruction_token,
             "history": message_histories.get(room_id, [])
         }
         with open(path.join(ROOMS_DIR, f"room_{room_id}.json"), "w", encoding="utf-8") as f:
@@ -157,6 +171,7 @@ def accept_client_connection():
     while True:
         try:
             client_socket, addr = server.accept()
+            client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
             clientlist[client_socket] = ''
             addrlist.append(addr)
             msgbrod = Thread(target=broadcast_message_to_client, args=(client_socket,), daemon=True)
@@ -246,7 +261,7 @@ def broadcast_message_to_client(client_socket):
                 message_histories[chatID].append(out_data)
                 if len(message_histories[chatID]) > 100:
                     message_histories[chatID].pop(0)
-                save_room_history(chatID)
+                save_room_history(chatID, room_tokens.get(chatID))
                 payload = (dumps(out_data) + "\n").encode("utf-8")
                 if message_type == "text_message":
                     print(f"{time} - {date} {chatID} {name} : \n{data['data']}")
@@ -309,6 +324,7 @@ def voice_chat_server():
         sock.listen()
         while True:
             client_socket, addr = sock.accept()
+            client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
             client_socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
             Thread(target=handle_voice_client, args=(client_socket,), daemon=True).start()
     except Exception as x:
@@ -377,6 +393,18 @@ def request_message_history(client_socket, data):
             return
         data_dict = loads(in_data.strip())
         room_ID = data_dict.get('room_ID')
+        client_id = data_dict.get('client_id')
+        with membership_lock:
+            authorized_room = room_membership.get(client_id)
+        if authorized_room != room_ID:
+            out_data = {
+                "request": "history",
+                "room_ID": room_ID,
+                "data": "client_not_connected_to_room"
+            }
+            client_socket.sendall((dumps(out_data) + "\n").encode("utf-8"))
+            client_socket.close()
+            return
         if is_room_destructed(room_ID):
             out_data = {"request": "history", "room_ID": room_ID, "history": [], "destructed": True}
         elif room_ID in message_histories:
@@ -521,8 +549,9 @@ def create_room(client_socket, data):
                 visiblerooms.append(room_to_make)
             rooms.append(room_to_make)
             message_histories[room_to_make] = []
-            room_tokens[room_to_make] = str(token_hex(16))
-            save_room_history(room_to_make)
+            token = str(token_hex(16))
+            room_tokens[room_to_make] = str(token)
+            save_room_history(room_to_make,token)
             record_room_creation(ip)
             clientlist[client_socket] = room_to_make
             client_socket.sendall((dumps({
@@ -626,6 +655,7 @@ def sub_request_handler():
     while True:
         try:
             client_socket, addr = sock.accept()
+            client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
             client_socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
             Thread(target=handle_sub_request, args=(client_socket,), daemon=True).start()
         except Exception as x:

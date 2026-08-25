@@ -18,6 +18,7 @@ from os import path
 from sys import platform
 from queue import Queue, Empty
 from subprocess import Popen, PIPE, run as un
+import ssl
 
 WIDTH, HEIGHT = 680, 550
 HOST = "127.0.0.1"
@@ -25,6 +26,7 @@ PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
 CONFIG_FILE = path.join(path.dirname(__file__), "config.json")
+CERT_FILE = path.join(path.dirname(__file__), "cert.pem")
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 2
 
@@ -54,12 +56,22 @@ pending_message_data = {}
 message_retry_count = {}
 send_queue = Queue()
 
+try :
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_REQUIRED
+    ssl_context.load_verify_locations(CERT_FILE)
+except Exception as e:
+    showerror(title='μChat', message=f'Cannot start app due to missing SSL context.\nError: {e}')
+    quit()
+
 if platform == "win32":
     import ctypes
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(0)
     except Exception:
         pass
+
 
 root = Tk()
 root.withdraw()
@@ -73,6 +85,7 @@ try:
     client = socket(AF_INET, SOCK_STREAM)
     client.settimeout(5)
     client.connect((HOST, PORT_CHAT))
+    client = ssl_context.wrap_socket(client,server_hostname=HOST)
 except Exception as e:
     showerror(title='μChat', message=f'Cannot connect to server.\nErr : {e}')
     quit()
@@ -95,6 +108,7 @@ if not noinputoutput:
     try:
         voicesocket = socket(AF_INET, SOCK_STREAM)
         voicesocket.connect((HOST, PORT_VOICE))
+        voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
         voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
         client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
         data = {
@@ -102,7 +116,7 @@ if not noinputoutput:
         }
         voicesocket.sendall(dumps(data).encode("utf-8"))
     except Exception as e:
-        showerror(title='μChat', message='Voice chat failed to connect.\nThe chat may still work.')
+        showerror(title='μChat', message=f'Voice chat failed to connect.\nThe chat may still work.\n{e}')
 
 if path.exists(CONFIG_FILE):
     try:
@@ -248,6 +262,7 @@ def join_room_on_server(room_id, cid):
         sock = socket(AF_INET, SOCK_STREAM)
         sock.settimeout(5)
         sock.connect((HOST, PORT_SUB_REQUESTS))
+        sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
         sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
         payload = {
             "request": "join_room",
@@ -298,6 +313,7 @@ def update_available_rooms(max_per_column, inner_frame, logindiag, idfield, nick
                 searchsock = socket(AF_INET, SOCK_STREAM)
                 searchsock.settimeout(3)
                 searchsock.connect((HOST, PORT_SUB_REQUESTS))
+                searchsock = ssl_context.wrap_socket(searchsock,server_hostname=HOST)
                 searchsock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
                 searchsock.sendall((dumps({"request": "available_rooms"}) + "\n").encode("utf-8"))
                 raw_inp = searchsock.recv(65536).decode("utf-8")
@@ -373,7 +389,7 @@ def show_login_dialog():
     logindiag.resizable(False, False)
     if a is True:
         toplabel = Label(logindiag, text="Choose a room to join or enter direct room ID.", font=("Arial", 10), fg='black', wraplength=430, anchor=CENTER)
-        toplabel.pack(anchor=W, padx=10, pady=(5, 0))
+        toplabel.pack(anchor=W, padx=20, pady=(5, 0))
         Label(logindiag, text="Scanning for publicly available rooms...", font=("Italic", 10), fg='gray').pack(anchor=CENTER, padx=10, pady=(5, 0))
         topprogbar = ttk.Progressbar(logindiag, orient=HORIZONTAL, length=438, mode='indeterminate')
         topprogbar.pack(anchor=W, padx=10, pady=(5, 5))
@@ -440,6 +456,7 @@ def show_login_dialog():
                     sock = socket(AF_INET, SOCK_STREAM)
                     sock.settimeout(5)
                     sock.connect((HOST, PORT_SUB_REQUESTS))
+                    sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
                     sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
                     payload = {
                         "request": "create_room",
@@ -867,6 +884,7 @@ def destruct_chat():
         try:
             sock = socket(AF_INET, SOCK_STREAM)
             sock.connect((HOST, PORT_SUB_REQUESTS))
+            sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
             payload = {
                 "request": "destruction",
                 "data": dumps({"password": pwd, "room_ID": chatID, "token": room_token})
@@ -998,6 +1016,7 @@ def typing_receiver():
     global typesock
     typesock = socket(AF_INET, SOCK_STREAM)
     typesock.connect((HOST, PORT_SUB_REQUESTS))
+    typesock = ssl_context.wrap_socket(typesock,server_hostname=HOST)
     typesock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
     sock = typesock
     if not sock:
@@ -1123,8 +1142,9 @@ def load_history():
         sock = socket(AF_INET, SOCK_STREAM)
         progressbar.config(value=20)
         sock.connect((HOST, PORT_SUB_REQUESTS))
+        sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
         progressbar.config(value=30)
-        sock.sendall((dumps({"request": "history", "data": dumps({"room_ID": chatID})}) + "\n").encode("utf-8"))
+        sock.sendall((dumps({"request": "history", "data": dumps({"room_ID": chatID, "client_id": client_id})}) + "\n").encode("utf-8"))
         progressbar.config(value=50)
         buffer = ""
         while True:
@@ -1136,6 +1156,11 @@ def load_history():
                 break
         progressbar.config(value=80)
         data_dict = loads(buffer.strip())
+        if data_dict.get("data") == "client_not_connected_to_room":
+            promptscreen.destroy()
+            showerror(title='μChat', message="You are not connected to this room.")
+            return
+        history = data_dict.get("history", [])
         history = data_dict.get("history", [])
         progressbar.config(value=85)
         clear_chat_frame()
@@ -1167,6 +1192,7 @@ def header():
         try:
             st = time()
             s.connect((HOST, PORT_SUB_REQUESTS))
+            s = ssl_context.wrap_socket(s,server_hostname=HOST)
             s.sendall((dumps({"request": "ping", "data": "none"}) + "\n").encode("utf-8"))
             et = time()
             ping = f"{str(round((et - st) * 1000, 2))} ms"
@@ -1263,6 +1289,7 @@ def voice_sender():
                     voicesocket.close()
                     voicesocket = socket(AF_INET, SOCK_STREAM)
                     voicesocket.connect((HOST, PORT_VOICE))
+                    voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
                     voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
                     client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
                     data = {"chat_id": chatID}
