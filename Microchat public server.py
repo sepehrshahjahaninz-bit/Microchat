@@ -208,16 +208,17 @@ def broadcast_message_to_client(client_socket):
                 client_id = data.get("client_id")
                 if is_room_destructed(chatID):
                     destruction_msg = (dumps({
-                        "message_type": "room_destroyed",
+                        "message_type": "error",
+                        "error": "room_destroyed",
                         "room_ID": chatID,
-                        "room_destructed": True
                     }) + "\n").encode("utf-8")
                     client_socket.sendall(destruction_msg)
                     client_socket.close()
                     return
                 if chatID not in rooms:
                     out_data = {
-                        "message_type": "room_does_not_exist",
+                        "message_type": "error",
+                        "error": "room_does_not_exist",
                         "room_ID": chatID,
                         "id" : msg_id
                     }
@@ -228,7 +229,8 @@ def broadcast_message_to_client(client_socket):
                     authorized_room = room_membership.get(client_id)
                 if authorized_room != chatID:
                     out_data = {
-                        "message_type": "client_not_connected_to_room",
+                        "message_type": "error",
+                        "error": "client_not_connected_to_room",
                         "room_ID": chatID,
                         "id": msg_id
                     }
@@ -280,10 +282,9 @@ def broadcast_message_to_client(client_socket):
     try:
         client_socket.close()
         clientlist.pop(client_socket, None)
-        disconnected_client_id = socket_client_ids.pop(client_socket, None)
-        if disconnected_client_id:
-            with membership_lock:
-                room_membership.pop(disconnected_client_id, None)
+        socket_client_ids.pop(client_socket, None)
+        with membership_lock:
+            room_membership.pop(client_id, None)
     except Exception:
         pass
 
@@ -514,6 +515,7 @@ def create_room(client_socket, data):
         ip = client_socket.getpeername()[0]
         room_to_make = data.get("room_id")
         VisibleOrNo = data.get("visible")
+        client_id = data.get("client_id")
         allowed, wait_time = check_room_creation_allowed(ip)
         if not allowed:
             client_socket.sendall((dumps({
@@ -537,6 +539,14 @@ def create_room(client_socket, data):
             }) + "\n").encode("utf-8"))
             client_socket.close()
             return
+        with membership_lock:
+            if client_id in room_membership:
+                client_socket.sendall((dumps({
+                    "request": "create_room",
+                    "data": "already_joined_a_room"
+                }) + "\n").encode("utf-8"))
+                client_socket.close()
+                return
         if room_to_make in rooms:
             client_socket.sendall((dumps({
                 "request": "create_room",

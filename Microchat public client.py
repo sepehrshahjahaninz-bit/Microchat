@@ -19,9 +19,10 @@ from sys import platform
 from queue import Queue, Empty
 from subprocess import Popen, PIPE, run as un
 import ssl
+import sys
 
-WIDTH, HEIGHT = 680, 550
-HOST = "127.0.0.1"
+WIDTH, HEIGHT = 680, 580
+HOST = "application-hosts.shahjahani.com"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
@@ -46,6 +47,7 @@ typesock = None
 muted = False
 saved_nickname = ""
 uploading_image = False
+reconnected = True
 active_typers = {}
 previous_visibleroomslist = []
 visiblerooms = []
@@ -56,6 +58,14 @@ pending_message_data = {}
 message_retry_count = {}
 send_queue = Queue()
 
+def safe_quit():
+    try:
+        root.safe_quit()
+        root.destroy()
+    except Exception:
+        pass
+    sys.exit()
+
 try :
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ssl_context.check_hostname = False
@@ -63,7 +73,7 @@ try :
     ssl_context.load_verify_locations(CERT_FILE)
 except Exception as e:
     showerror(title='μChat', message=f'Cannot start app due to missing SSL context.\nError: {e}')
-    quit()
+    safe_quit()
 
 if platform == "win32":
     import ctypes
@@ -85,10 +95,11 @@ try:
     client = socket(AF_INET, SOCK_STREAM)
     client.settimeout(5)
     client.connect((HOST, PORT_CHAT))
-    client = ssl_context.wrap_socket(client,server_hostname=HOST)
+    client.settimeout(None)
+    client = ssl_context.wrap_socket(client, server_hostname=HOST)
 except Exception as e:
     showerror(title='μChat', message=f'Cannot connect to server.\nErr : {e}')
-    quit()
+    safe_quit()
 
 try:
     audio_queue = Queue()
@@ -382,7 +393,7 @@ def show_login_dialog():
     global chatID, nickname, id_visible, connectedormaderoom, saved_nickname
     a = askyesnocancel(title='μChat', message='Do you want to join a chat? Click No to create a new room.')
     if a is None:
-        quit()
+        safe_quit()
     logindiag = Toplevel(root)
     logindiag.title('μChat')
     logindiag.geometry('460x250')
@@ -424,7 +435,7 @@ def show_login_dialog():
         btn_frame = Frame(logindiag)
         btn_frame.pack(fill='x', pady=10)
         Button(btn_frame, text="Join", command=lambda: validate(None, logindiag, idfield, nicknamefield, id_visible_var), bg="green", fg="white", width=10).pack(side="left", padx=15)
-        Button(btn_frame, text="Cancel", command=lambda: (logindiag.destroy(), quit()), bg="red", fg="white", width=10).pack(side="right", padx=15)
+        Button(btn_frame, text="Cancel", command=lambda: (logindiag.destroy(), safe_quit()), bg="red", fg="white", width=10).pack(side="right", padx=15)
         update_available_rooms(max_per_column, inner_frame, logindiag, idfield, nicknamefield, id_visible_var)
         logindiag.update_idletasks()
         needed_height = max(250, logindiag.winfo_reqheight())
@@ -460,7 +471,7 @@ def show_login_dialog():
                     sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
                     payload = {
                         "request": "create_room",
-                        "data": {"room_id": new_id, "visible": visible}
+                        "data": {"room_id": new_id, "visible": visible, "client_id": client_id}
                     }
                     sock.sendall((dumps(payload) + "\n").encode("utf-8"))
                     buffer = ""
@@ -500,7 +511,7 @@ def show_login_dialog():
         btn_frame = Frame(logindiag)
         btn_frame.pack(fill='x', pady=10)
         Button(btn_frame, text="Create", command=create_room, bg="green", fg="white", width=10).pack(side="left", padx=15)
-        Button(btn_frame, text="Cancel", command=lambda: (logindiag.destroy(), quit()), bg="red", fg="white", width=10).pack(side="right", padx=15)
+        Button(btn_frame, text="Cancel", command=lambda: (logindiag.destroy(), safe_quit()), bg="red", fg="white", width=10).pack(side="right", padx=15)
     root.wait_window(logindiag)
 
 def gettimestamp():
@@ -524,10 +535,10 @@ try:
         pass
     elif join_result.get("data") == "already_joined_a_room":
         showerror(title='μChat', message="This client has already joined a room previously and cannot join another.")
-        quit()
+        safe_quit()
     else:
         showerror(title='μChat', message=f"Couldn't join room.\n{join_result.get('data', join_result.get('error'))}")
-        quit()
+        safe_quit()
     data = {
         "chat_id": chatID,
         "id_is_visible": id_visible,
@@ -543,7 +554,31 @@ try:
     client.sendall((str(dumps(data)) + "\n").encode("utf-8"))
 except Exception as e:
     showerror(title='μChat', message='Can\'t connect.\nError:' + str(e))
-    quit()
+    safe_quit()
+
+def connect_main_socket():
+    global client
+    s = socket(AF_INET, SOCK_STREAM)
+    s.settimeout(5)
+    s.connect((HOST, PORT_CHAT))
+    s = ssl_context.wrap_socket(s, server_hostname=HOST)
+    s.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+    s.settimeout(None)
+    client = s
+    join_room_on_server(chatID, client_id)
+    rejoin = {
+        "chat_id": chatID,
+        "id_is_visible": id_visible,
+        "data": 'connected',
+        "message_type": "text_message",
+        "name": nickname,
+        "description": "none",
+        "time": gettimestamp(),
+        "date": getdatestamp(),
+        "client_id": client_id,
+        "id": str(uuid4())
+    }
+    client.sendall((dumps(rejoin) + "\n").encode("utf-8"))
 
 def errorsign():
     root.config(bg='red')
@@ -1050,80 +1085,134 @@ def typing_receiver():
         except Exception as e:
             pass
 
+def flash_green():
+    try:
+        root.config(bg='green')
+        autoscchbx.config(bg='green')
+        sticktocorner.config(bg='green')
+        headertxt.config(bg='green')
+        headerdot.config(bg='green')
+        typing_status_label.config(bg='green')
+        enclbl.config(bg='green')
+        root.after(100, flash_reset)
+    except TclError:
+        pass
+
+def flash_reset():
+    try:
+        root.config(bg='light grey')
+        autoscchbx.config(bg='light grey')
+        sticktocorner.config(bg='light grey')
+        headertxt.config(bg='light grey')
+        headerdot.config(bg='light grey')
+        typing_status_label.config(bg='light grey')
+        enclbl.config(bg='light grey')
+        ymstbx.focus()
+    except TclError:
+        pass
+
 def receive():
-    global alreadysending, image_attached,client_id
+    global alreadysending, image_attached, client_id, reconnected
     buffer = ""
     while True:
         try:
             chunk = client.recv(4096).decode('utf-8')
             if not chunk:
-                break
+                raise ConnectionError("socket closed by peer")
             buffer += chunk
+
             while "\n" in buffer:
                 raw_data, buffer = buffer.split("\n", 1)
                 raw_data = raw_data.strip()
                 if not raw_data:
                     continue
-                data = loads(raw_data)
-                
-                message_type = data.get("message_type")
-                incoming_id = data.get("id")
-                
-                if message_type in ("room_deleted", "room_destroyed") or data.get("room_destructed"):
-                    root.after(0, handle_room_destruction)
-                    return
-                elif message_type == "error":
-                    err_id = data.get("id")
-                    if data.get("error") == "message_buffer_too_large":
-                        showerror(title='μChat', message=f"Can't send message.\nmessage buffer is too large.")
-                    elif data.get("error") == "message_too_large":
-                        if err_id:
-                            root.after(0, remove_failed_message, err_id)
-                    else:
-                        showerror(title='μChat', message=f"Can't send message.\n{data.get('error')}")
+
+                try:
+                    data = loads(raw_data)
+                except Exception as parse_err:
+                    print(f"Skipping corrupted message: {parse_err}")
                     continue
 
-                message = data["data"]
-                name = data["name"]
-                description = data.get("description", "")
-                time = data.get("time", "--:--")
-                date = data.get("date", "--/--/----")
-                client_id_num = data.get("client_id", "unknown")
+                try:
+                    message_type = data.get("message_type")
+                    incoming_id = data.get("id")
 
-                if client_id_num == client_id and incoming_id in pending_messages:
-                    root.after(0, mark_message_sent, incoming_id)
-                else:
-                    root.after(0, lambda m=message, mt=message_type, n=name, d=description, t=time, dt=date, c=client_id_num, i=incoming_id:
-                        create_new_message_bubble(message=m, message_type=mt, name=n, description=d, time=t, date=dt, client_id_num=c, msg_id=i, pending=False))
+                    if message_type in ("room_deleted", "room_destroyed") or data.get("room_destructed"):
+                        root.after(0, handle_room_destruction)
+                        return
+                    elif message_type == "error":
+                        err_id = data.get("id")
+                        err = data.get("error")
+                        if err == "message_buffer_too_large":
+                            showerror(title='μChat', message="Can't send message.\nmessage buffer is too large.")
+                        elif err == "message_too_large":
+                            if err_id:
+                                root.after(0, remove_failed_message, err_id)
+                        elif err == "room_destroyed":
+                            root.after(0, handle_room_destruction)
+                            return
+                        elif err in ("room_does_not_exist", "client_not_connected_to_room"):
+                            global chat_destroyed
+                            chat_destroyed = True
+                            root.after(0, lambda: showerror(title='μChat', message=f"Connection rejected by server:\n{err}\nPlease restart the app."))
+                            return
+                        else:
+                            showerror(title='μChat', message=f"Can't send message.\n{err}")
+                        continue
 
-                root.after(0, lambda: (tbxmaincanvas.update_idletasks(), tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))))
-                                
-                if root.state() != 'normal' and not muted:
-                    if message_type == "text_message":
-                        root.after(0, lambda: notification_listener(message=message, name=name, message_type=message_type))
-                    elif message_type == "image_message":
-                        root.after(0, lambda: notification_listener(message=message, name=name, message_type=message_type, description=description))
-                if autoscroll.get() == 1:
-                    tbxmaincanvas.yview_moveto(1.0)
-                
-                root.config(bg='green')
-                autoscchbx.config(bg='green')
-                sticktocorner.config(bg='green')
-                headertxt.config(bg='green')
-                headerdot.config(bg='green')
-                typing_status_label.config(bg='green')
-                sleep(0.1)
-                root.config(bg='light grey')
-                autoscchbx.config(bg='light grey')
-                sticktocorner.config(bg='light grey')
-                headertxt.config(bg='light grey')
-                headerdot.config(bg='light grey')
-                typing_status_label.config(bg='light grey')
-                ymstbx.focus()
-                alreadysending = False
-                image_attached = False
-        except Exception as x:
-            sleep(0.1)
+                    if "data" not in data or "name" not in data:
+                        print(f"Skipping message missing required fields: {data}")
+                        continue
+
+                    message = data["data"]
+                    name = data["name"]
+                    description = data.get("description", "")
+                    msg_time = data.get("time", "--:--")
+                    date = data.get("date", "--/--/----")
+                    client_id_num = data.get("client_id", "unknown")
+
+                    if client_id_num == client_id and incoming_id in pending_messages:
+                        root.after(0, mark_message_sent, incoming_id)
+                    else:
+                        root.after(0, lambda m=message, mt=message_type, n=name, d=description, t=msg_time, dt=date, c=client_id_num, i=incoming_id:
+                            create_new_message_bubble(message=m, message_type=mt, name=n, description=d, time=t, date=dt, client_id_num=c, msg_id=i, pending=False))
+
+                    root.after(0, lambda: (tbxmaincanvas.update_idletasks(), tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))))
+
+                    if root.state() != 'normal' and not muted:
+                        if message_type == "text_message":
+                            root.after(0, lambda: notification_listener(message=message, name=name, message_type=message_type))
+                        elif message_type == "image_message":
+                            root.after(0, lambda: notification_listener(message=message, name=name, message_type=message_type, description=description))
+
+                    if autoscroll.get() == 1:
+                        root.after(0, lambda: tbxmaincanvas.yview_moveto(1.0))
+
+                    root.after(0, flash_green)
+
+                except Exception as handling_err:
+                    print(f"Error handling message: {handling_err}")
+                    continue
+
+        except (ConnectionError, OSError, ssl.SSLError, UnicodeDecodeError) as sock_err:
+            if chat_destroyed:
+                return
+            try:
+                client.close()
+            except Exception:
+                pass
+            reconnected = False
+            attempt = 0
+            while not reconnected and not chat_destroyed:
+                attempt += 1
+                try:
+                    root.after(0, lambda: headerdot.config(fg='orange'))
+                    connect_main_socket()
+                    reconnected = True
+                    root.after(0, lambda: headerdot.config(fg='green'))
+                except Exception:
+                    sleep(min(RETRY_BASE_DELAY * (2 ** min(attempt, 5)), 30))
+            buffer = ""
 
 def load_history():
     try:
@@ -1185,9 +1274,13 @@ def load_history():
         
 
 def header():
+    global reconnected
     while True:
         if chat_destroyed:
             break
+        if not reconnected:
+            sleep(0.1)
+            continue
         s = socket(AF_INET, SOCK_STREAM)
         try:
             st = time()
@@ -1302,39 +1395,58 @@ def voice_sender():
 def update_scroll(event=None):
     tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))
 
-def notification_listener(message, name,val=100,message_type="text_message",description=""):
-    notification_frame = Frame(background, bg='white', width=315, height=200)
-    start_x = -300
-    end_x = 50
-    notification_frame.place(x=start_x, y=30)
+notification_container = None
+
+def get_notification_container():
+    global notification_container
+    if notification_container is None or not notification_container.winfo_exists():
+        notification_container = Frame(background, bg='pink')
+        notification_container.place(x=0, y=30)
+    return notification_container
+
+def notification_listener(message, name, val=100, message_type="text_message", description=""):
+    container = get_notification_container()
+    row = Frame(container, bg='pink')
+    row.pack(side=TOP, anchor=W, pady=(0, 20))
+
+    notification_frame = Frame(row, bg='white')
+    start_x = -400
+
     def slide_in(current_x):
+        notification_frame.update_idletasks()
+        end_x = 50
         if current_x < end_x:
             new_x = min(current_x + 10, end_x)
-            notification_frame.place(x=new_x, y=30)
+            notification_frame.place(x=new_x, y=0)
             root.after(10, slide_in, new_x)
         else:
-            root.after(10, change_progress,val)
-    def change_progress(val):  
+            notification_frame.place(x=end_x, y=0)
+            root.after(10, change_progress, val)
+
+    def change_progress(val):
         try:
             if val != 0:
                 val -= 1
                 progress_bar.config(value=val)
-                root.after(35, change_progress,val)
+                root.after(35, change_progress, val)
             else:
-                root.after(10, slide_out, end_x)
+                root.after(10, slide_out, 50)
         except TclError:
             pass
-    def slide_out(current_x=end_x):
+
+    def slide_out(current_x=50):
         if current_x > start_x:
             new_x = max(current_x - 10, start_x)
-            notification_frame.place(x=new_x, y=30)
+            notification_frame.place(x=new_x, y=0)
             root.after(10, slide_out, new_x)
         else:
-            notification_frame.destroy()
+            row.destroy()
+
     def open_message():
         root.deiconify()
         root.lift()
         slide_out()
+
     title_label = Label(notification_frame, text="μChat New Message", fg='black', bg='white', font=('Arial', 11, 'bold'), anchor=W, justify=LEFT)
     name_label = Label(notification_frame, text=name, fg='black', bg='white', font=('Arial', 8, 'bold'), anchor=W, justify=LEFT)
     if message_type == "text_message":
@@ -1342,28 +1454,49 @@ def notification_listener(message, name,val=100,message_type="text_message",desc
     elif message_type == "image_message":
         image_bytes = b64decode(message)
         raw_img = Image.open(BytesIO(image_bytes))
-        raw_img.thumbnail((315, 250))
+        raw_img.thumbnail((330, 200))
         tk_img = ImageTk.PhotoImage(raw_img)
-        message_label = Label(notification_frame,image=tk_img, bg='white', anchor=W, wraplength=250, justify=LEFT,width=250)
-        message_label.image=tk_img
-        desc_label = Label(notification_frame, text=description if description != "none" else "", fg='black', bg='white', anchor=W, wraplength=250, justify=LEFT)
-    progress_bar = ttk.Progressbar(notification_frame, orient=HORIZONTAL, length=315,value=100)
-    backbtn = Button(notification_frame, text="X", command=slide_out, bg="red", fg="white", width=4, height=1)
-    openbtn = Button(notification_frame, text="^", command=open_message, bg="green", fg="white", width=4, height=1)
-    openbtn.place(x=267, y=55)
-    backbtn.place(x=267, y=5)
+        message_label = Label(notification_frame, image=tk_img, bg='white', anchor=W, wraplength=330, justify=LEFT, width=330)
+        message_label.image = tk_img
+        desc_label = Label(notification_frame, text=description if description != "none" else "", fg='black', bg='white', anchor=W, wraplength=380, justify=LEFT)
+    progress_bar = ttk.Progressbar(notification_frame, orient=HORIZONTAL, length=330, value=100)
+    backbtn = Button(
+        notification_frame, text="X", font=('Arial', 16, 'bold'),
+        command=slide_out, bg="white", fg="red",
+        borderwidth=0, highlightthickness=0, relief=FLAT,
+        activebackground="white", activeforeground="red",
+        padx=0, pady=0
+    )
+    openbtn = Button(
+        notification_frame, text="▲", font=('Arial', 18, 'bold'),
+        command=open_message, bg="white", fg="green",
+        borderwidth=0, highlightthickness=0, relief=FLAT,
+        activebackground="white", activeforeground="green",
+        padx=0, pady=0
+    )
     title_label.pack(pady=5, padx=5, anchor=W)
     name_label.pack(pady=5, padx=5, anchor=W)
     message_label.pack(pady=5, padx=5, anchor=W)
     if message_type == "image_message":
         desc_label.pack(pady=5, padx=5, anchor=W)
     progress_bar.pack(pady=5, padx=5, anchor=W)
+
+    notification_frame.update_idletasks()
+    w = notification_frame.winfo_reqwidth()
+    h = notification_frame.winfo_reqheight()
+    row.config(width=w + 70 ,height=h)
+    notification_frame.place(x=start_x, y=0)
+
+    openbtn.place(x=w - 55, y=-10)
+    backbtn.place(x=w - 90, y=-4)
+
     slide_in(start_x)
 
 def sync_frame_width(event):
     tbxmaincanvas.itemconfig(tbxmain_window, width=event.width)
 
 root.bind("<Return>", send)
+root.wm_attributes('-transparentcolor', "pink")
 root.resizable(False, False)
 background = Toplevel(root)
 background.title('')
@@ -1402,6 +1535,8 @@ ymstbx.bind("<KeyPress>", typing_sender)
 ymstbx.bind("<<Paste>>", paste_image_from_clipboard)
 typing_status_label = Label(text='', background="light gray", width=72, anchor=W, font=('Arial', 8, 'italic'), fg='gray')
 typing_status_label.place(x=12, y=42)
+enclbl = Label(text='🔒 Messages are encrypted during transit.', background="light gray", width=72, anchor=W, font=('Arial', 8), fg='gray')
+enclbl.place(x=12, y=550)
 sbtn.place(x=612, y=435)
 autoscchbx.place(x=12, y=485)
 sticktocorner.place(x=12, y=512)
