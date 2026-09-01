@@ -20,9 +20,16 @@ from queue import Queue, Empty
 from subprocess import Popen, PIPE, run as un
 import ssl
 import sys
+import gc
+
+try :
+    gc.disable()
+except Exception as e:
+    print(f'Cannot disable python\'s garbage collector!\nSome parts of the app may not work properly.\n{e}')
+    pass
 
 WIDTH, HEIGHT = 680, 580
-HOST = "application-hosts.shahjahani.com"
+HOST = "127.0.0.1"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
@@ -93,7 +100,7 @@ root.tk.call('tk', 'scaling', 2.0)
 
 try:
     client = socket(AF_INET, SOCK_STREAM)
-    client.settimeout(5)
+    client.settimeout(15) # i increased the timeout to 15 seconds so it can handle the delay on the encryption process.
     client.connect((HOST, PORT_CHAT))
     client.settimeout(None)
     client = ssl_context.wrap_socket(client, server_hostname=HOST)
@@ -271,7 +278,7 @@ def close_upload_bar():
 def join_room_on_server(room_id, cid):
     try:
         sock = socket(AF_INET, SOCK_STREAM)
-        sock.settimeout(5)
+        sock.settimeout(15)
         sock.connect((HOST, PORT_SUB_REQUESTS))
         sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
         sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
@@ -322,7 +329,7 @@ def update_available_rooms(max_per_column, inner_frame, logindiag, idfield, nick
         while not stop_event.is_set():
             try:
                 searchsock = socket(AF_INET, SOCK_STREAM)
-                searchsock.settimeout(3)
+                searchsock.settimeout(15)
                 searchsock.connect((HOST, PORT_SUB_REQUESTS))
                 searchsock = ssl_context.wrap_socket(searchsock,server_hostname=HOST)
                 searchsock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
@@ -465,7 +472,7 @@ def show_login_dialog():
                 new_id = create_an_ID(availableclies)
                 try:
                     sock = socket(AF_INET, SOCK_STREAM)
-                    sock.settimeout(5)
+                    sock.settimeout(15)
                     sock.connect((HOST, PORT_SUB_REQUESTS))
                     sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
                     sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
@@ -559,7 +566,7 @@ except Exception as e:
 def connect_main_socket():
     global client
     s = socket(AF_INET, SOCK_STREAM)
-    s.settimeout(5)
+    s.settimeout(15)
     s.connect((HOST, PORT_CHAT))
     s = ssl_context.wrap_socket(s, server_hostname=HOST)
     s.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
@@ -1296,12 +1303,16 @@ def header():
         headertxt.config(text=f'Room ID : {chatID} | Ping : {ping}')
         pingprogressbar.config(value=ping.replace(' ms', ''))
         sleep(1)
-    
+
 def windowmanager():
-    try:
+    tick = 0
+    try :
         while True:
             if chat_destroyed:
                 break
+            tick += 1
+            if tick % 50 == 0:
+                root.after(0, gc.collect)
             if stick.get() == 1:
                 root.after(0, lambda: (root.overrideredirect(True), place_top_left(), root.attributes('-topmost', True)))
             else:
