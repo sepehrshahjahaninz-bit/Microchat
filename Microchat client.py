@@ -98,6 +98,26 @@ root.config(background='light gray')
 root.resizable(False, False)
 root.tk.call('tk', 'scaling', 2.0)
 
+if path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            config = loads(f.read())
+            client_id = config.get("client_id")
+            saved_nickname = config.get("nickname")
+            created_rooms = config.get("created_rooms", {})
+            if not client_id:
+                raise ValueError("client_id key missing")
+    except Exception:
+        client_id = str(uuid4())
+        created_rooms = {}
+        with open(CONFIG_FILE, "w") as f:
+            f.write(dumps({"client_id": client_id, "nickname": saved_nickname, "created_rooms": created_rooms}, indent=4))
+else:
+    client_id = str(uuid4())
+    created_rooms = {}
+    with open(CONFIG_FILE, "w") as f:
+        f.write(dumps({"client_id": client_id, "nickname": saved_nickname, "created_rooms": created_rooms}, indent=4))
+
 try:
     client = socket(AF_INET, SOCK_STREAM)
     client.settimeout(15) # i increased the timeout to 15 seconds so it can handle the delay on the encryption process.
@@ -121,40 +141,6 @@ try:
 except:
     showwarning(title='μChat', message='No Audio input/output device detected! Voice chat is unavailable.')
     noinputoutput = True
-
-if not noinputoutput:
-    try:
-        voicesocket = socket(AF_INET, SOCK_STREAM)
-        voicesocket.connect((HOST, PORT_VOICE))
-        voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
-        voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-        client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-        data = {
-            "chat_id": chatID,
-        }
-        voicesocket.sendall(dumps(data).encode("utf-8"))
-    except Exception as e:
-        showerror(title='μChat', message=f'Voice chat failed to connect.\nThe chat may still work.\n{e}')
-
-if path.exists(CONFIG_FILE):
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            config = loads(f.read())
-            client_id = config.get("client_id")
-            saved_nickname = config.get("nickname")
-            created_rooms = config.get("created_rooms", {})
-            if not client_id:
-                raise ValueError("client_id key missing")
-    except Exception:
-        client_id = str(uuid4())
-        created_rooms = {}
-        with open(CONFIG_FILE, "w") as f:
-            f.write(dumps({"client_id": client_id, "nickname": saved_nickname, "created_rooms": created_rooms}, indent=4))
-else:
-    client_id = str(uuid4())
-    created_rooms = {}
-    with open(CONFIG_FILE, "w") as f:
-        f.write(dumps({"client_id": client_id, "nickname": saved_nickname, "created_rooms": created_rooms}, indent=4))
 
 def save_room_token(room_id, token):
     global created_rooms
@@ -559,6 +545,20 @@ try:
         "id": str(uuid4())
     }
     client.sendall((str(dumps(data)) + "\n").encode("utf-8"))
+    if not noinputoutput:
+        try:
+            voicesocket = socket(AF_INET, SOCK_STREAM)
+            voicesocket.connect((HOST, PORT_VOICE))
+            voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
+            voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+            client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+            data = {
+                "chat_id": chatID,
+                "client_id": client_id,
+            }
+            voicesocket.sendall(dumps(data).encode("utf-8"))
+        except Exception as e:
+            showerror(title='μChat', message=f'Voice chat failed to connect.\nThe chat may still work.\n{e}')
 except Exception as e:
     showerror(title='μChat', message='Can\'t connect.\nError:' + str(e))
     safe_quit()
@@ -587,6 +587,17 @@ def connect_main_socket():
     }
     client.sendall((dumps(rejoin) + "\n").encode("utf-8"))
 
+def connect_voice():
+    global voicesocket
+    voicesocket.close()
+    voicesocket = socket(AF_INET, SOCK_STREAM)
+    voicesocket.connect((HOST, PORT_VOICE))
+    voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
+    voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+    client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+    data = {"chat_id": chatID, "client_id": client_id}
+    voicesocket.sendall((dumps(data) + "\n").encode("utf-8"))
+    
 def errorsign():
     root.config(bg='red')
     autoscchbx.config(bg='red')
@@ -1362,17 +1373,33 @@ def enable_mic():
 
 def voice_receiver():
     if not noinputoutput:
+        buffer = b""
         while True:
             if chat_destroyed:
                 break
             try:
-                data = voicesocket.recv(32768)
-                if not data:
-                    break
-                if audio_enabled == True:
-                    output_stream.write(data)
+                chunk = voicesocket.recv(65536)
+                if not chunk:
+                    raise ConnectionError("voice socket closed by peer")
+                buffer += chunk
+                while len(buffer) >= 4:
+                    frame_len = int.from_bytes(buffer[:4], "big")
+                    if len(buffer) < 4 + frame_len:
+                        break
+                    frame = buffer[4:4+frame_len]
+                    buffer = buffer[4+frame_len:]
+                    if audio_enabled == True:
+                        output_stream.write(frame)
             except Exception as e:
-                break
+                if chat_destroyed:
+                    break
+                for i in range(3):
+                    try:
+                        connect_voice()
+                        buffer = b""
+                        break
+                    except Exception:
+                        sleep(0.1)
 
 def voice_sender():
     if not noinputoutput:
@@ -1382,26 +1409,18 @@ def voice_sender():
                 break
             try:
                 if voice_enabled:
-                    data = input_stream.read(CHUNK, exception_on_overflow=False)
-                    voicesocket.sendall(data)
+                    raw = input_stream.read(CHUNK, exception_on_overflow=False)
+                    voicesocket.sendall(len(raw).to_bytes(4, "big") + raw)
                 else:
-                    sleep(0.1) 
+                    sleep(0.1)
             except Exception as e:
-                if chat_destroyed:
-                    break
-                try:
-                    voicesocket.close()
-                    voicesocket = socket(AF_INET, SOCK_STREAM)
-                    voicesocket.connect((HOST, PORT_VOICE))
-                    voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
-                    voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-                    client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-                    data = {"chat_id": chatID}
-                    voicesocket.sendall(dumps(data).encode("utf-8"))
-                except Exception as e:
-                    if not chat_destroyed:
-                        showerror(title='μChat', message='Voice chat was disconnected.')
-                    break
+                if not chat_destroyed:
+                    for i in range(3):
+                        try:
+                            connect_voice()
+                            break
+                        except Exception:
+                            sleep(0.1)
 
 def update_scroll(event=None):
     tbxmaincanvas.configure(scrollregion=tbxmaincanvas.bbox("all"))
@@ -1546,8 +1565,10 @@ ymstbx.bind("<KeyPress>", typing_sender)
 ymstbx.bind("<<Paste>>", paste_image_from_clipboard)
 typing_status_label = Label(text='', background="light gray", width=72, anchor=W, font=('Arial', 8, 'italic'), fg='gray')
 typing_status_label.place(x=12, y=42)
-enclbl = Label(text='🔒 Messages are encrypted during transit.', background="light gray", width=72, anchor=W, font=('Arial', 8), fg='gray')
+enclbl = Label(text='🔒 Messages are encrypted during transit.', background="light gray", width=72, anchor=W, font=('Arial', 8), fg='black')
 enclbl.place(x=12, y=550)
+voicechatlbl = Label(text='╚ Voice Chat ╝', background="light gray", anchor=W, font=('Arial', 8), fg='black')
+voicechatlbl.place(x=545, y=545)
 sbtn.place(x=612, y=435)
 autoscchbx.place(x=12, y=485)
 sticktocorner.place(x=12, y=512)

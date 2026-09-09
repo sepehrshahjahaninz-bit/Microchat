@@ -290,33 +290,49 @@ def broadcast_message_to_client(client_socket):
 
 
 def handle_voice_client(client_socket):
+    buffer = b""
     try:
         request = loads(client_socket.recv(1024).decode("utf-8"))
         chat_id = request["chat_id"]
+        client_id = request["client_id"]
         if is_room_destructed(chat_id):
+            client_socket.close()
+            return
+        with membership_lock:
+            authorized_room = room_membership.get(client_id)
+        if authorized_room != chat_id:
             client_socket.close()
             return
         with voice_clients_lock:
             voice_clients[client_socket] = chat_id
         while True:
-            data = client_socket.recv(4096)
-            if not data:
+            chunk = client_socket.recv(65536)
+            if not chunk:
                 break
-            with voice_clients_lock:
-                sender_chat_id = voice_clients.get(client_socket)
-                for c in voice_clients:
-                    if c != client_socket and voice_clients[c] == sender_chat_id:
-                        try:
-                            c.sendall(data)
-                        except Exception:
-                            pass
+            buffer += chunk
+            if len(buffer) > MAX_BUFFER_SIZE:
+                break
+            while len(buffer) >= 4:
+                frame_len = int.from_bytes(buffer[:4], "big")
+                if len(buffer) < 4 + frame_len:
+                    break
+                frame = buffer[4:4+frame_len]
+                buffer = buffer[4+frame_len:]
+                payload = frame_len.to_bytes(4, "big") + frame
+                with voice_clients_lock:
+                    sender_chat_id = voice_clients.get(client_socket)
+                    for c in list(voice_clients.keys()):
+                        if c != client_socket and voice_clients[c] == sender_chat_id:
+                            try:
+                                c.sendall(payload)
+                            except Exception:
+                                pass
     except Exception:
         pass
     with voice_clients_lock:
         if client_socket in voice_clients:
             del voice_clients[client_socket]
     client_socket.close()
-
 
 def voice_chat_server():
     try:
