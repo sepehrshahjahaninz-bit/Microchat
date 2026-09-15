@@ -1,3 +1,5 @@
+from gevent import monkey
+monkey.patch_all()
 from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_REUSEADDR, SHUT_WR
 from threading import Thread, Lock
 from json import dumps, loads
