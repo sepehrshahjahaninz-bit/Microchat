@@ -1,4 +1,4 @@
-from socket import socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY
+from socket import socket, AF_INET, SOCK_STREAM, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_KEEPALIVE
 from tkinter.messagebox import showerror, showwarning, askyesnocancel, askyesno
 from tkinter import *
 from tkinter import ttk
@@ -29,7 +29,7 @@ except Exception as e:
     pass
 
 WIDTH, HEIGHT = 680, 580
-HOST = "application-hosts.shahjahani.com"
+HOST = "127.0.0.1"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
@@ -118,29 +118,38 @@ else:
     with open(CONFIG_FILE, "w") as f:
         f.write(dumps({"client_id": client_id, "nickname": saved_nickname, "created_rooms": created_rooms}, indent=4))
 
-try:
-    client = socket(AF_INET, SOCK_STREAM)
-    client.settimeout(15) # i increased the timeout to 15 seconds so it can handle the delay on the encryption process.
-    client.connect((HOST, PORT_CHAT))
-    client.settimeout(None)
-    client = ssl_context.wrap_socket(client, server_hostname=HOST)
-except Exception as e:
-    showerror(title='μChat', message=f'Cannot connect to server.\nErr : {e}')
-    safe_quit()
+client_connect_error = [None]
+def connect_client_startup():
+    global client
+    try:
+        client = socket(AF_INET, SOCK_STREAM)
+        client.setsockopt(SOL_SOCKET,SO_KEEPALIVE,1)
+        client.settimeout(10)
+        client.connect((HOST, PORT_CHAT))
+        client = ssl_context.wrap_socket(client, server_hostname=HOST)
+        client.settimeout(None)
+    except Exception as e:
+        client_connect_error[0] = e
+client_connect_thread = Thread(target=connect_client_startup, daemon=True)
+client_connect_thread.start()
 
-try:
-    audio_queue = Queue()
-    p = PyAudio()
-    CHUNK = 512
-    FORMAT = paInt32
-    CHANNELS = 2
-    RATE = 48000
-    input_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
-    output_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
-    noinputoutput = False
-except:
-    showwarning(title='μChat', message='No Audio input/output device detected! Voice chat is unavailable.')
-    noinputoutput = True
+audio_queue = Queue()
+p = PyAudio()
+CHUNK = 512
+FORMAT = paInt32
+CHANNELS = 2
+RATE = 48000
+noinputoutput = False
+def init_audio():
+    global input_stream, output_stream, noinputoutput
+    try:
+        input_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+        output_stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
+        noinputoutput = False
+    except:
+        noinputoutput = True
+audio_init_thread = Thread(target=init_audio, daemon=True)
+audio_init_thread.start()
 
 def save_room_token(room_id, token):
     global created_rooms
@@ -516,13 +525,36 @@ def getdatestamp():
 while not (chatID and nickname):
     show_login_dialog()
 
+client_connect_thread.join()
+if client_connect_error[0] is not None:
+    showerror(title='μChat', message=f'Cannot connect to server.\nErr : {client_connect_error[0]}')
+    safe_quit()
+
 room_token = created_rooms.get(chatID)
 
 root.deiconify()
 
 try:
-    if 'room_token' not in globals():
-        room_token = None
+    voice_error = [None]
+    def connect_voice_startup():
+        global voicesocket
+        try:
+            audio_init_thread.join()
+            if noinputoutput:
+                return
+            voicesocket = socket(AF_INET, SOCK_STREAM)
+            voicesocket.connect((HOST, PORT_VOICE))
+            voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
+            voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+            data = {
+                "chat_id": chatID,
+                "client_id": client_id,
+            }
+            voicesocket.sendall(dumps(data).encode("utf-8"))
+        except Exception as e:
+            voice_error[0] = e
+    voice_thread = Thread(target=connect_voice_startup, daemon=True)
+    voice_thread.start()
     join_result = join_room_on_server(chatID, client_id)
     if join_result.get("data") == "joined_successfully":
         pass
@@ -545,23 +577,16 @@ try:
         "id": str(uuid4())
     }
     client.sendall((str(dumps(data)) + "\n").encode("utf-8"))
-    if not noinputoutput:
-        try:
-            voicesocket = socket(AF_INET, SOCK_STREAM)
-            voicesocket.connect((HOST, PORT_VOICE))
-            voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
-            voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-            client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-            data = {
-                "chat_id": chatID,
-                "client_id": client_id,
-            }
-            voicesocket.sendall(dumps(data).encode("utf-8"))
-        except Exception as e:
-            showerror(title='μChat', message=f'Voice chat failed to connect.\nThe chat may still work.\n{e}')
+    client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+    voice_thread.join()
+    if voice_error[0] is not None:
+        showerror(title='μChat', message=f'Voice chat failed to connect.\nThe chat may still work.\n{voice_error[0]}')
 except Exception as e:
     showerror(title='μChat', message='Can\'t connect.\nError:' + str(e))
     safe_quit()
+
+if noinputoutput:
+    showwarning(title='μChat', message='No Audio input/output device detected! Voice chat is unavailable.')
 
 def connect_main_socket():
     global client
@@ -1293,24 +1318,50 @@ def load_history():
 
 def header():
     global reconnected
+    ping_sock = None
+    def connect_ping_sock():
+        s = socket(AF_INET, SOCK_STREAM)
+        s.settimeout(10)
+        s.connect((HOST, PORT_SUB_REQUESTS))
+        s = ssl_context.wrap_socket(s, server_hostname=HOST)
+        s.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+        s.sendall((dumps({"request": "ping", "data": "none"}) + "\n").encode("utf-8"))
+        buf = ""
+        while "\n" not in buf:
+            chunk = s.recv(4096).decode("utf-8")
+            if not chunk:
+                raise ConnectionError("ping socket closed during handshake")
+            buf += chunk
+        return s
     while True:
         if chat_destroyed:
             break
         if not reconnected:
             sleep(0.1)
             continue
-        s = socket(AF_INET, SOCK_STREAM)
         try:
+            if ping_sock is None:
+                ping_sock = connect_ping_sock()
             st = time()
-            s.connect((HOST, PORT_SUB_REQUESTS))
-            s = ssl_context.wrap_socket(s,server_hostname=HOST)
-            s.sendall((dumps({"request": "ping", "data": "none"}) + "\n").encode("utf-8"))
+            ping_sock.sendall((dumps({"request": "ping", "data": "none"}) + "\n").encode("utf-8"))
+            buffer = ""
+            while "\n" not in buffer:
+                chunk = ping_sock.recv(4096).decode("utf-8")
+                if not chunk:
+                    raise ConnectionError("ping socket closed by peer")
+                buffer += chunk
             et = time()
             ping = f"{str(round((et - st) * 1000, 2))} ms"
             headerdot.config(fg='green')
-        except Exception as x:
+        except Exception:
             ping = '-1 ms'
-            headerdot.config(fg=f'red')
+            headerdot.config(fg='red')
+            try:
+                if ping_sock:
+                    ping_sock.close()
+            except Exception:
+                pass
+            ping_sock = None
         headertxt.config(text=f'Room ID : {chatID} | Ping : {ping}')
         pingprogressbar.config(value=ping.replace(' ms', ''))
         sleep(1)

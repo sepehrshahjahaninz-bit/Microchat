@@ -1,15 +1,14 @@
+import gevent as gv
 from gevent import monkey
+from gevent.lock import Semaphore
 monkey.patch_all()
-from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_REUSEADDR, SHUT_WR
-from threading import Thread, Lock
+from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_REUSEADDR, SHUT_WR, SO_KEEPALIVE
 from json import dumps, loads
-from os import path, makedirs, listdir
+from os import path, makedirs, listdir, replace as os_replace
 from collections import defaultdict
 from time import time as time_now
 from secrets import token_hex
 import ssl
-
-# basic configs for main app functions and server ports
 
 VOICE_PORT = 2082
 CHAT_PORT = 2052
@@ -19,16 +18,10 @@ HOST_ON = "0.0.0.0"
 ROOMS_DIR = path.join(path.dirname(__file__), "rooms")
 CERT_FILE = path.join(path.dirname(__file__), "cert.pem")
 KEY_FILE = path.join(path.dirname(__file__), "key.pem")
-
-# room creator rate limiter config
-
 ROOMS_TO_ALLOW_AT_FIRST = 5
 BASE_DELAY = 30
 DELAY_MULTIPLIER = 2
 MAXIMUM_ROOMS = 100
-
-# message size settings
-
 MAX_BUFFER_SIZE = 1024 * 1024
 
 if not path.exists(ROOMS_DIR):
@@ -39,6 +32,7 @@ print('.........................................')
 try:
     server = socket(AF_INET, SOCK_STREAM)
     server.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+    server.setsockopt(SOL_SOCKET, SO_KEEPALIVE, 1)
     server.bind((HOST_ON, CHAT_PORT))
 except Exception as x:
     print('\nCannot host likely due to port congestion.')
@@ -53,11 +47,11 @@ client = False
 voice_clients = {}
 visiblerooms = []
 message_histories = {}
-voice_clients_lock = Lock()
+voice_clients_lock = Semaphore()
 roomlogs = defaultdict(list)
-roomlock = Lock()
+roomlock = Semaphore()
 room_membership = {}
-membership_lock = Lock()
+membership_lock = Semaphore()
 room_tokens = {}
 socket_client_ids = {}
 
@@ -115,8 +109,11 @@ def save_room_history(room_id,destruction_token):
             "destruction_token": destruction_token,
             "history": message_histories.get(room_id, [])
         }
-        with open(path.join(ROOMS_DIR, f"room_{room_id}.json"), "w", encoding="utf-8") as f:
+        filepath = path.join(ROOMS_DIR, f"room_{room_id}.json")
+        tmppath = filepath + ".tmp"
+        with open(tmppath, "w", encoding="utf-8") as f:
             f.write(dumps(data))
+        os_replace(tmppath, filepath)
     except Exception:
         pass
 
@@ -130,8 +127,10 @@ def mark_room_destructed(room_id):
         "history": history
     }
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        tmppath = filepath + ".tmp"
+        with open(tmppath, "w", encoding="utf-8") as f:
             f.write(dumps(data))
+        os_replace(tmppath, filepath)
     except Exception:
         pass
 
@@ -168,22 +167,22 @@ def accept_client_connection():
         server.listen()
         print(f'Server started successfully\nAddress : {gethostbyname(gethostname())}\n.........................................')
         print('\nWARNING : DO NOT CLOSE THIS WINDOW! CLOSING THIS WINDOW WILL SHUT DOWN THE HOST.\n')
-    except Exception:
-        pass
+    except Exception as x:
+        print(f'Server error: {x}')
     while True:
         try:
             client_socket, addr = server.accept()
             client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
             clientlist[client_socket] = ''
             addrlist.append(addr)
-            msgbrod = Thread(target=broadcast_message_to_client, args=(client_socket,), daemon=True)
+            msgbrod = gv.spawn(broadcast_message_to_client,client_socket)
             msgbrod.start()
-        except Exception:
-            pass
-
+        except Exception as x:
+            print(f"Server error: {x}")
 
 def broadcast_message_to_client(client_socket):
     buffer = ""
+    client_id = None
     while True:
         try:
             chunk = client_socket.recv(4096).decode("utf-8")
@@ -193,7 +192,7 @@ def broadcast_message_to_client(client_socket):
             if len(buffer) > MAX_BUFFER_SIZE:
                 out_data = {
                     "message_type": "error",
-                    "room_ID": chatID,
+                    "room_ID": None,
                     "error": "message_buffer_too_large",
                 }
                 client_socket.sendall((dumps(out_data) + "\n").encode("utf-8"))
@@ -294,7 +293,17 @@ def broadcast_message_to_client(client_socket):
 def handle_voice_client(client_socket):
     buffer = b""
     try:
-        request = loads(client_socket.recv(1024).decode("utf-8"))
+        while b"\n" not in buffer:
+            chunk = client_socket.recv(4096)
+            if not chunk:
+                client_socket.close()
+                return
+            buffer += chunk
+            if len(buffer) > MAX_BUFFER_SIZE:
+                client_socket.close()
+                return
+        header_line, buffer = buffer.split(b"\n", 1)
+        request = loads(header_line.decode("utf-8"))
         chat_id = request["chat_id"]
         client_id = request["client_id"]
         if is_room_destructed(chat_id):
@@ -339,15 +348,21 @@ def handle_voice_client(client_socket):
 def voice_chat_server():
     try:
         sock = socket(AF_INET, SOCK_STREAM)
+        sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        sock.setsockopt(SOL_SOCKET, SO_KEEPALIVE, 1)
         sock.bind((HOST_ON, VOICE_PORT))
         sock.listen()
-        while True:
+    except Exception as x:
+        print(f'Voice error: {x}')
+        return
+    while True:
+        try:
             client_socket, addr = sock.accept()
             client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
             client_socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-            Thread(target=handle_voice_client, args=(client_socket,), daemon=True).start()
-    except Exception as x:
-        print(f'Voice error: {x}')
+            gv.spawn(handle_voice_client,client_socket)
+        except Exception as x:
+            print(f"Voice error (Still continuing): {x}")
 
 
 def self_destruction_transmitter(client_socket, data):
@@ -358,10 +373,11 @@ def self_destruction_transmitter(client_socket, data):
         token = payloaddict.get('token')
         out_data = {"request": "destruction", "room_ID": room_ID, "success": False}
         if password == DESTRUCTOR_PASSWORD and token == room_tokens.get(room_ID):
-            if room_ID in visiblerooms:
-                visiblerooms.remove(room_ID)
-            if room_ID in rooms:
-                rooms.remove(room_ID)
+            with roomlock:
+                if room_ID in visiblerooms:
+                    visiblerooms.remove(room_ID)
+                if room_ID in rooms:
+                    rooms.remove(room_ID)
             mark_room_destructed(room_ID)
             message_histories.pop(room_ID, None)
             room_tokens.pop(room_ID, None)
@@ -370,7 +386,7 @@ def self_destruction_transmitter(client_socket, data):
                 "room_ID": room_ID,
                 "room_destructed": True
             }) + "\n").encode("utf-8")
-            target_clients = [c for c, room in clientlist.items() if room == room_ID]
+            target_clients = [c for c, room in list(clientlist.items()) if room == room_ID]
             for c in target_clients:
                 try:
                     c.sendall(destruction_msg)
@@ -381,10 +397,9 @@ def self_destruction_transmitter(client_socket, data):
                     c.close()
                 except Exception:
                     pass
-                if c in clientlist:
-                    clientlist.pop(c, None)
+                clientlist.pop(c, None)
             with voice_clients_lock:
-                target_voice = [vc for vc, room in voice_clients.items() if room == room_ID]
+                target_voice = [vc for vc, room in list(voice_clients.items()) if room == room_ID]
                 for vc in target_voice:
                     try:
                         vc.close()
@@ -565,29 +580,30 @@ def create_room(client_socket, data):
                 }) + "\n").encode("utf-8"))
                 client_socket.close()
                 return
-        if room_to_make in rooms:
-            client_socket.sendall((dumps({
-                "request": "create_room",
-                "data": "room_id_already_exists"
-            }) + "\n").encode("utf-8"))
-            client_socket.close()
-            return
-        else:
-            if VisibleOrNo == True:
-                visiblerooms.append(room_to_make)
-            rooms.append(room_to_make)
-            message_histories[room_to_make] = []
-            token = str(token_hex(16))
-            room_tokens[room_to_make] = str(token)
-            save_room_history(room_to_make,token)
-            record_room_creation(ip)
-            clientlist[client_socket] = room_to_make
-            client_socket.sendall((dumps({
-                "request": "create_room",
-                "data": "room_created",
-                "token": room_tokens.get(room_to_make)
-            }) + "\n").encode("utf-8"))
-            client_socket.close()
+        with roomlock:
+            if room_to_make in rooms:
+                client_socket.sendall((dumps({
+                    "request": "create_room",
+                    "data": "room_id_already_exists"
+                }) + "\n").encode("utf-8"))
+                client_socket.close()
+                return
+            else:
+                if VisibleOrNo == True:
+                    visiblerooms.append(room_to_make)
+                rooms.append(room_to_make)
+        message_histories[room_to_make] = []
+        token = str(token_hex(16))
+        room_tokens[room_to_make] = str(token)
+        save_room_history(room_to_make,token)
+        record_room_creation(ip)
+        clientlist[client_socket] = room_to_make
+        client_socket.sendall((dumps({
+            "request": "create_room",
+            "data": "room_created",
+            "token": room_tokens.get(room_to_make)
+        }) + "\n").encode("utf-8"))
+        client_socket.close()
     except Exception as x:
         print(f"Create room error: {x}")
         try:
@@ -638,9 +654,47 @@ def join_room(client_socket, data):
         except:
             pass
 
-def handle_sub_request(client_socket):
+def ping_server(client_socket):
     try:
-        payload = client_socket.recv(1024).decode("utf-8")
+        client_socket.settimeout(30)
+        client_socket.sendall((dumps({
+            "request": "ping",
+            "data": "pong",
+        }) + "\n").encode("utf-8"))
+        buffer = ""
+        while True:
+            chunk = client_socket.recv(4096)
+            if not chunk:
+                break
+            buffer += chunk.decode("utf-8")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                client_socket.sendall((dumps({
+                    "request": "ping",
+                    "data": "pong",
+                }) + "\n").encode("utf-8"))
+    except Exception as x:
+        print(f"Ping server error: {x}")
+    finally:
+        try:
+            client_socket.close()
+        except Exception:
+            pass
+
+def handle_sub_request(client_socket):
+    buffer = ""
+    try:
+        while '\n' not in buffer:
+            chunk = client_socket.recv(4096).decode("utf-8")
+            if not chunk:
+                break
+            buffer += chunk
+            if len(buffer) > MAX_BUFFER_SIZE:
+                break
+        payload = buffer.strip()
         if not payload:
             client_socket.close()
             return
@@ -654,7 +708,7 @@ def handle_sub_request(client_socket):
         elif request == "typing":
             handle_typing_client(client_socket, data)
         elif request == "ping":
-            client_socket.close()
+            gv.spawn(ping_server, client_socket)
         elif request == "available_rooms":
             send_available_rooms(client_socket)
         elif request == "create_room":
@@ -672,25 +726,25 @@ def handle_sub_request(client_socket):
 
 
 def sub_request_handler():
+  try:
+    sock = socket(AF_INET, SOCK_STREAM)
+    sock.setsockopt(SOL_SOCKET, SO_KEEPALIVE, 1)
+    sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+    sock.bind((HOST_ON, SUB_REQUESTS_PORT))
+    sock.listen()
+  except Exception as x:
+    print(f'\nSub request server encountered an error.\n{x}')
+    return
+  while True:
     try:
-        sock = socket(AF_INET, SOCK_STREAM)
-        sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-        sock.bind((HOST_ON, SUB_REQUESTS_PORT))
-        sock.listen()
+      client_socket, addr = sock.accept()
+      client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
+      client_socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+      gv.spawn(handle_sub_request, client_socket)
     except Exception as x:
-        print(f'\nSub request server encountered an error.\n{x}')
-        return
-    while True:
-        try:
-            client_socket, addr = sock.accept()
-            client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
-            client_socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-            Thread(target=handle_sub_request, args=(client_socket,), daemon=True).start()
-        except Exception as x:
-            print(f"Sub request error: {x}")
+      print(f'Sub request error: {x}')
 
-
-Thread(target=voice_chat_server, daemon=True).start()
-Thread(target=sub_request_handler, daemon=True).start()
+gv.spawn(voice_chat_server)
+gv.spawn(sub_request_handler)
 
 accept_client_connection()
