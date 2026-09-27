@@ -29,7 +29,7 @@ except Exception as e:
     pass
 
 WIDTH, HEIGHT = 680, 580
-HOST = "127.0.0.1"
+HOST = "application-hosts.shahjahani.com"
 PORT_CHAT = 2052
 PORT_VOICE = 2082
 PORT_SUB_REQUESTS = 2053
