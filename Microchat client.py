@@ -29,7 +29,7 @@ except Exception as e:
     pass
 
 WIDTH, HEIGHT = 680, 580
-HOST = "127.0.0.1"
+HOST = "application-hosts.shahjahani.com"
 PORT = 2052
 CONFIG_FILE = path.join(path.dirname(__file__), "config.json")
 CERT_FILE = path.join(path.dirname(__file__), "cert.pem")
@@ -1145,6 +1145,7 @@ def flash_green():
         headerdot.config(bg='green')
         typing_status_label.config(bg='green')
         enclbl.config(bg='green')
+        voicechatlbl.config(bg='green')
         root.after(100, flash_reset)
     except TclError:
         pass
@@ -1158,6 +1159,7 @@ def flash_reset():
         headerdot.config(bg='light grey')
         typing_status_label.config(bg='light grey')
         enclbl.config(bg='light grey')
+        voicechatlbl.config(bg='light grey')
         ymstbx.focus()
     except TclError:
         pass
