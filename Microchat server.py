@@ -10,9 +10,7 @@ from time import time as time_now
 from secrets import token_hex
 import ssl
 
-VOICE_PORT = 2082
-CHAT_PORT = 2052
-SUB_REQUESTS_PORT = 2053
+PORT = 2052
 DESTRUCTOR_PASSWORD = 'nopassword'
 HOST_ON = "0.0.0.0"
 ROOMS_DIR = path.join(path.dirname(__file__), "rooms")
@@ -33,7 +31,7 @@ try:
     server = socket(AF_INET, SOCK_STREAM)
     server.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
     server.setsockopt(SOL_SOCKET, SO_KEEPALIVE, 1)
-    server.bind((HOST_ON, CHAT_PORT))
+    server.bind((HOST_ON, PORT))
 except Exception as x:
     print('\nCannot host likely due to port congestion.')
     print(x)
@@ -161,6 +159,43 @@ def record_room_creation(ip):
     with roomlock:
         roomlogs[ip].append(time_now())
 
+def connection_handler(client_socket):
+    try:
+        client_socket.settimeout(10)
+        buffer = ""
+        while "\n" not in buffer:
+            chunk = client_socket.recv(4096)
+            if not chunk:
+                client_socket.close()
+                return
+            buffer += chunk.decode("utf-8")
+            if len(buffer) > MAX_BUFFER_SIZE:
+                client_socket.close()
+                return
+        first_line, buffer = buffer.split("\n", 1)
+        first_line = first_line.strip()
+        if not first_line:
+            client_socket.close()
+            return
+        in_data = loads(first_line)
+        client_socket.settimeout(None)
+        if in_data.get("channel") == "sub_requests":
+            handle_sub_request(client_socket, buffer)
+        elif in_data.get("channel") == "voice_chat":
+            handle_voice_client(client_socket, buffer.encode("utf-8"))
+        elif in_data.get("channel") == "chat":
+            broadcast_message_to_client(client_socket, buffer)
+        else:
+            out_data = {"message_type": "error", "error": "invalid_channel"}
+            client_socket.sendall((dumps(out_data) + "\n").encode("utf-8"))
+            client_socket.close()
+    except Exception as x:
+        try:
+            client_socket.close()
+        except Exception:
+            pass
+        print(f"Connection handler error: {x}")
+
 def accept_client_connection():
     try:
         global addr
@@ -175,13 +210,12 @@ def accept_client_connection():
             client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
             clientlist[client_socket] = ''
             addrlist.append(addr)
-            msgbrod = gv.spawn(broadcast_message_to_client,client_socket)
+            msgbrod = gv.spawn(connection_handler,client_socket)
             msgbrod.start()
         except Exception as x:
             print(f"Server error: {x}")
 
-def broadcast_message_to_client(client_socket):
-    buffer = ""
+def broadcast_message_to_client(client_socket, buffer=""):
     client_id = None
     while True:
         try:
@@ -289,9 +323,7 @@ def broadcast_message_to_client(client_socket):
     except Exception:
         pass
 
-
-def handle_voice_client(client_socket):
-    buffer = b""
+def handle_voice_client(client_socket, buffer=b""):
     try:
         while b"\n" not in buffer:
             chunk = client_socket.recv(4096)
@@ -344,26 +376,6 @@ def handle_voice_client(client_socket):
         if client_socket in voice_clients:
             del voice_clients[client_socket]
     client_socket.close()
-
-def voice_chat_server():
-    try:
-        sock = socket(AF_INET, SOCK_STREAM)
-        sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-        sock.setsockopt(SOL_SOCKET, SO_KEEPALIVE, 1)
-        sock.bind((HOST_ON, VOICE_PORT))
-        sock.listen()
-    except Exception as x:
-        print(f'Voice error: {x}')
-        return
-    while True:
-        try:
-            client_socket, addr = sock.accept()
-            client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
-            client_socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-            gv.spawn(handle_voice_client,client_socket)
-        except Exception as x:
-            print(f"Voice error (Still continuing): {x}")
-
 
 def self_destruction_transmitter(client_socket, data):
     try:
@@ -684,8 +696,7 @@ def ping_server(client_socket):
         except Exception:
             pass
 
-def handle_sub_request(client_socket):
-    buffer = ""
+def handle_sub_request(client_socket, buffer=""):
     try:
         while '\n' not in buffer:
             chunk = client_socket.recv(4096).decode("utf-8")
@@ -723,28 +734,5 @@ def handle_sub_request(client_socket):
             client_socket.close()
         except Exception:
             pass
-
-
-def sub_request_handler():
-  try:
-    sock = socket(AF_INET, SOCK_STREAM)
-    sock.setsockopt(SOL_SOCKET, SO_KEEPALIVE, 1)
-    sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-    sock.bind((HOST_ON, SUB_REQUESTS_PORT))
-    sock.listen()
-  except Exception as x:
-    print(f'\nSub request server encountered an error.\n{x}')
-    return
-  while True:
-    try:
-      client_socket, addr = sock.accept()
-      client_socket = ssl_context.wrap_socket(client_socket, server_side=True)
-      client_socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
-      gv.spawn(handle_sub_request, client_socket)
-    except Exception as x:
-      print(f'Sub request error: {x}')
-
-gv.spawn(voice_chat_server)
-gv.spawn(sub_request_handler)
 
 accept_client_connection()

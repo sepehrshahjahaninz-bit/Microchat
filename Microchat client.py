@@ -29,10 +29,8 @@ except Exception as e:
     pass
 
 WIDTH, HEIGHT = 680, 580
-HOST = "application-hosts.shahjahani.com"
-PORT_CHAT = 2052
-PORT_VOICE = 2082
-PORT_SUB_REQUESTS = 2053
+HOST = "127.0.0.1"
+PORT = 2052
 CONFIG_FILE = path.join(path.dirname(__file__), "config.json")
 CERT_FILE = path.join(path.dirname(__file__), "cert.pem")
 MAX_RETRIES = 3
@@ -125,8 +123,9 @@ def connect_client_startup():
         client = socket(AF_INET, SOCK_STREAM)
         client.setsockopt(SOL_SOCKET,SO_KEEPALIVE,1)
         client.settimeout(10)
-        client.connect((HOST, PORT_CHAT))
+        client.connect((HOST, PORT))
         client = ssl_context.wrap_socket(client, server_hostname=HOST)
+        client.sendall((dumps({"channel": "chat"}) + "\n").encode("utf-8"))
         client.settimeout(None)
     except Exception as e:
         client_connect_error[0] = e
@@ -274,9 +273,11 @@ def join_room_on_server(room_id, cid):
     try:
         sock = socket(AF_INET, SOCK_STREAM)
         sock.settimeout(15)
-        sock.connect((HOST, PORT_SUB_REQUESTS))
+        sock.connect((HOST, PORT))
         sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
         sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+        payload = {"channel": "sub_requests"}
+        sock.sendall((dumps(payload) + "\n").encode("utf-8"))
         payload = {
             "request": "join_room",
             "data": dumps({"room_ID": room_id, "client_id": cid})
@@ -325,15 +326,15 @@ def update_available_rooms(max_per_column, inner_frame, logindiag, idfield, nick
             try:
                 searchsock = socket(AF_INET, SOCK_STREAM)
                 searchsock.settimeout(15)
-                searchsock.connect((HOST, PORT_SUB_REQUESTS))
+                searchsock.connect((HOST, PORT))
                 searchsock = ssl_context.wrap_socket(searchsock,server_hostname=HOST)
                 searchsock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+                searchsock.sendall((dumps({"channel": "sub_requests"}) + "\n").encode("utf-8"))
                 searchsock.sendall((dumps({"request": "available_rooms"}) + "\n").encode("utf-8"))
                 raw_inp = searchsock.recv(65536).decode("utf-8")
                 searchsock.close()
                 result = loads(raw_inp.strip()).get("data")
                 roomsfound = result[0]
-                availableclies = result[1]
                 if roomsfound is not None:
                     result_queue.put(("data", roomsfound))
             except Exception as x:
@@ -468,9 +469,11 @@ def show_login_dialog():
                 try:
                     sock = socket(AF_INET, SOCK_STREAM)
                     sock.settimeout(15)
-                    sock.connect((HOST, PORT_SUB_REQUESTS))
+                    sock.connect((HOST, PORT))
                     sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
                     sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+                    payload = {"channel": "sub_requests"}
+                    sock.sendall((dumps(payload) + "\n").encode("utf-8"))
                     payload = {
                         "request": "create_room",
                         "data": {"room_id": new_id, "visible": visible, "client_id": client_id}
@@ -543,9 +546,10 @@ try:
             if noinputoutput:
                 return
             voicesocket = socket(AF_INET, SOCK_STREAM)
-            voicesocket.connect((HOST, PORT_VOICE))
+            voicesocket.connect((HOST, PORT))
             voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
             voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+            voicesocket.sendall((dumps({"channel": "voice_chat"}) + "\n").encode("utf-8"))
             data = {
                 "chat_id": chatID,
                 "client_id": client_id,
@@ -592,7 +596,7 @@ def connect_main_socket():
     global client
     s = socket(AF_INET, SOCK_STREAM)
     s.settimeout(15)
-    s.connect((HOST, PORT_CHAT))
+    s.connect((HOST, PORT))
     s = ssl_context.wrap_socket(s, server_hostname=HOST)
     s.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
     s.settimeout(None)
@@ -616,10 +620,11 @@ def connect_voice():
     global voicesocket
     voicesocket.close()
     voicesocket = socket(AF_INET, SOCK_STREAM)
-    voicesocket.connect((HOST, PORT_VOICE))
+    voicesocket.connect((HOST, PORT))
     voicesocket = ssl_context.wrap_socket(voicesocket,server_hostname=HOST)
     voicesocket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
     client.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+    voicesocket.sendall((dumps({"channel": "voice_chat"}) + "\n").encode("utf-8"))
     data = {"chat_id": chatID, "client_id": client_id}
     voicesocket.sendall((dumps(data) + "\n").encode("utf-8"))
     
@@ -961,8 +966,10 @@ def destruct_chat():
     def do_destruct():
         try:
             sock = socket(AF_INET, SOCK_STREAM)
-            sock.connect((HOST, PORT_SUB_REQUESTS))
+            sock.connect((HOST, PORT))
             sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
+            payload = {"channel": "sub_requests"}
+            sock.sendall((dumps(payload) + "\n").encode("utf-8"))
             payload = {
                 "request": "destruction",
                 "data": dumps({"password": pwd, "room_ID": chatID, "token": room_token})
@@ -1093,10 +1100,11 @@ def remove_typer(name):
 def typing_receiver():
     global typesock
     typesock = socket(AF_INET, SOCK_STREAM)
-    typesock.connect((HOST, PORT_SUB_REQUESTS))
+    typesock.connect((HOST, PORT))
     typesock = ssl_context.wrap_socket(typesock,server_hostname=HOST)
     typesock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
     sock = typesock
+    sock.sendall((dumps({"channel": "sub_requests"}) + "\n").encode("utf-8"))
     if not sock:
         return
     buffer = ""
@@ -1273,9 +1281,10 @@ def load_history():
         progressbar.config(value=10)
         sock = socket(AF_INET, SOCK_STREAM)
         progressbar.config(value=20)
-        sock.connect((HOST, PORT_SUB_REQUESTS))
+        sock.connect((HOST, PORT))
         sock = ssl_context.wrap_socket(sock,server_hostname=HOST)
         progressbar.config(value=30)
+        sock.sendall((dumps({"channel": "sub_requests"}) + "\n").encode("utf-8"))
         sock.sendall((dumps({"request": "history", "data": dumps({"room_ID": chatID, "client_id": client_id})}) + "\n").encode("utf-8"))
         progressbar.config(value=50)
         buffer = ""
@@ -1322,9 +1331,10 @@ def header():
     def connect_ping_sock():
         s = socket(AF_INET, SOCK_STREAM)
         s.settimeout(10)
-        s.connect((HOST, PORT_SUB_REQUESTS))
+        s.connect((HOST, PORT))
         s = ssl_context.wrap_socket(s, server_hostname=HOST)
         s.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+        s.sendall((dumps({"channel": "sub_requests"}) + "\n").encode("utf-8"))
         s.sendall((dumps({"request": "ping", "data": "none"}) + "\n").encode("utf-8"))
         buf = ""
         while "\n" not in buf:
