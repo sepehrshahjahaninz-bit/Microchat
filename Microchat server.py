@@ -2,7 +2,7 @@ import gevent as gv
 from gevent import monkey
 from gevent.lock import Semaphore
 monkey.patch_all()
-from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, IPPROTO_TCP, TCP_NODELAY, SOL_SOCKET, SO_REUSEADDR, SHUT_WR, SO_KEEPALIVE
+from socket import socket, AF_INET, SOCK_STREAM, gethostbyname, gethostname, SOL_SOCKET, SO_REUSEADDR, SHUT_WR, SO_KEEPALIVE
 from json import dumps, loads
 from os import path, makedirs, listdir, replace as os_replace
 from collections import defaultdict
